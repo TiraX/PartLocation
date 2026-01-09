@@ -1,0 +1,44 @@
+# Dataset Generation Configuration
+
+# Paths
+blender_path: "blender"  # Path to Blender executable, or "blender" if in PATH
+models_dir: "./data/raw/models"  # Directory containing 3D model files
+output_dir: "./data/processed"  # Output directory for generated dataset
+
+# Dataset splits
+train_ratio: 0.7
+val_ratio: 0.15
+test_ratio: 0.15
+
+# Total number of samples to generate
+num_samples: 14000  # Will be split into train/val/test
+
+# Rendering settings
+views:
+  - front
+  - back
+  - left
+  - right
+
+combine_mode: "grid"  # Options: "grid", "horizontal", "separate"
+resolution: 512  # Image resolution (width and height in pixels)
+
+# Data augmentation
+augmentation:
+  enable_elevation: true
+  elevation_range: [-10, 10]  # Degrees
+  enable_azimuth: true
+  azimuth_range: [-10, 10]  # Degrees
+  enable_lighting: false  # Not implemented yet
+  enable_background: false  # Not implemented yet
+
+# Model-specific settings (adjust based on your models)
+# These should be customized for each model type
+model_config:
+  whole_object_name: "Body"  # Name of the whole object in Blender
+  part_names:  # Names of part objects
+    - "Head"
+    - "LeftArm"
+    - "RightArm"
+    - "LeftLeg"
+    - "RightLeg"
