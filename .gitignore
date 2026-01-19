@@ -27,7 +27,6 @@ ENV/
 .venv
 
 # IDEs
-.vscode/
 .idea/
 *.swp
 *.swo
@@ -80,6 +79,7 @@ Thumbs.db
 
 # Reports
 *.json
+!.vscode/*json
 !configs/*.json
 !configs/*.yaml
 dataset_report.json
