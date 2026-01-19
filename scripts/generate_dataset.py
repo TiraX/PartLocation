@@ -108,14 +108,6 @@ class DatasetGenerator:
             effective_range = target_range * (1.0 - 2.0 * self.padding)
             scale_factor = effective_range / max_dimension if max_dimension > 0 else 1.0
             
-            whole_normalization = {
-                "original_center": original_center.tolist(),
-                "original_size": original_size.tolist(),
-                "scale_factor": float(scale_factor),
-                "target_range": [self.min_val, self.max_val],
-                "padding": self.padding
-            }
-            
             # Save normalized whole model
             whole_output_path = sample_dir / f"{sample_name}-whole.fbx"
             if not FbxUtil.save_model(model, output_path=str(whole_output_path), ignore_skeleton=True):
@@ -153,19 +145,19 @@ class DatasetGenerator:
                 part_normalized_center = (part_normalized_min + part_normalized_max) * 0.5
                 
                 # Calculate part's normalization scale factor
-                part_max_dimension = np.max(part_size_in_whole)
-                part_scale_factor = effective_range / part_max_dimension if part_max_dimension > 0 else 1.0
+                part_max_dimension_in_whole = np.max(part_size_in_whole)
+                part_max_dimension_normalized = np.max(part_normalized_max - part_normalized_min)
+                part_scale_factor = part_max_dimension_in_whole / part_max_dimension_normalized
                 
                 # Calculate relative transformation
                 # Translation: part center in whole's normalized space
-                translation = part_center_in_whole
+                translation = part_center_in_whole - part_normalized_center
                 
                 # Rotation: identity (no rotation in this simple case)
                 rotation = np.array([1.0, 0.0, 0.0, 0.0])  # [qw, qx, qy, qz]
                 
                 # Scale: ratio of part's scale to whole's scale
-                scale_ratio = part_scale_factor / scale_factor if scale_factor > 0 else 1.0
-                scale = np.array([scale_ratio, scale_ratio, scale_ratio])
+                scale = np.array([part_scale_factor, part_scale_factor, part_scale_factor])
                 
                 # Save normalized part model
                 part_output_path = sample_dir / f"{sample_name}-{part_name}.fbx"
@@ -179,17 +171,7 @@ class DatasetGenerator:
                     "part_name": part_name,
                     "translation": translation.tolist(),
                     "rotation": rotation.tolist(),
-                    "scale": scale.tolist(),
-                    "part_normalization": {
-                        "original_center_in_whole": part_center_in_whole.tolist(),
-                        "original_size_in_whole": part_size_in_whole.tolist(),
-                        "scale_factor": float(part_scale_factor)
-                    },
-                    "bounds_in_whole": {
-                        "min": part_bounds_min_in_whole.tolist(),
-                        "max": part_bounds_max_in_whole.tolist()
-                    },
-                    "whole_normalization": whole_normalization
+                    "scale": scale.tolist()
                 }
                 
                 # Save part JSON
@@ -205,7 +187,6 @@ class DatasetGenerator:
         except Exception as e:
             print(f"Error processing {fbx_path}: {e}")
             return False
-
 
 def generate_dataset_task(input_paths: List[Tuple[str, bool]]) -> List[Task]:
     """
@@ -326,10 +307,11 @@ Examples:
     
     # Define input paths
     input_paths = [
-        ('d:/Data/ShadowUnit', False), 
-        ('d:/Data/DiabloChar/Processed', True), 
-        ('d:/Data/models_gta5.peds_only/models/peds', True), 
-        ('d:/Data/models_rdr2.peds_only/models/peds', True), 
+        ('/Users/shuaizhao/Documents/aaa/snowdrop/ue/Fbx', False)
+        # ('d:/Data/ShadowUnit', False), 
+        # ('d:/Data/DiabloChar/Processed', True), 
+        # ('d:/Data/models_gta5.peds_only/models/peds', True), 
+        # ('d:/Data/models_rdr2.peds_only/models/peds', True), 
     ]
     
     if args.parallel:
