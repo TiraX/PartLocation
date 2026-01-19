@@ -736,7 +736,7 @@ class FbxUtil:
         if exporter.Initialize(output_path):
             exporter.Export(self.scene)
             exporter.Destroy()
-            print(f"Successfully exported to FBX: {output_path}")
+            # print(f"Successfully exported to FBX: {output_path}")
             return True
         else:
             print(f"Failed to initialize FBX exporter for: {output_path}")
@@ -850,7 +850,7 @@ class FbxUtil:
         for i in range(texture_count):
             texture = fbx_property.GetSrcObject(i)
             
-            if texture and texture.GetClassId().Is(fbx.FbxFileTexture.ClassId):
+            if texture and isinstance(texture, fbx.FbxFileTexture):
                 # Directly use texture object instead of Cast
                 texture_path = texture.GetFileName()
                 

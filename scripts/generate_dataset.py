@@ -10,6 +10,7 @@ This script processes FBX files to create training data:
 6. Save normalized models and transformation parameters
 """
 
+import os
 import sys
 import json
 import argparse
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from mesh_dump.fbx_utils import FbxUtil
 from mesh_dump.model import Model
 from mesh_dump.mesh import Mesh
+from mesh_dump.parallel_tasks import ParallelTasks, Task
 
 
 class DatasetGenerator:
@@ -45,13 +47,12 @@ class DatasetGenerator:
         # Create output directory
         self.output_dir.mkdir(parents=True, exist_ok=True)
         
-    def process_fbx_file(self, fbx_path: str, sample_name: Optional[str] = None) -> bool:
+    def process_fbx_file(self, fbx_path: str) -> bool:
         """
         Process a single FBX file.
         
         Args:
             fbx_path: Path to FBX file
-            sample_name: Optional custom sample name (default: use filename)
             
         Returns:
             True if processing successful, False otherwise
@@ -61,62 +62,45 @@ class DatasetGenerator:
             print(f"Error: FBX file not found: {fbx_path}")
             return False
         
-        # Use filename as sample name if not provided
-        if sample_name is None:
-            sample_name = fbx_path.stem
-        
-        print(f"\n{'='*60}")
-        print(f"Processing: {fbx_path.name}")
-        print(f"Sample name: {sample_name}")
-        print(f"{'='*60}")
+        # Use filename as sample name
+        sample_name = fbx_path.stem
         
         # Create sample directory
         sample_dir = self.output_dir / sample_name
         sample_dir.mkdir(parents=True, exist_ok=True)
-        print(f"Output directory: {sample_dir}")
         
         try:
             # Step 1: Load FBX model
-            print("\n[1/5] Loading FBX model...")
             model = FbxUtil.load_model(str(fbx_path), ignore_skeleton=True)
             if model is None:
                 print(f"Error: Failed to load FBX file: {fbx_path}")
                 return False
             if len(model.meshes) == 1:
-                print(f"Warning: Model has only 1 mesh, skipping processing")
+                print(f"Warning: Model has only 1 mesh, skipping processing: {fbx_path}")
                 return False
-            print(f"  Loaded model with {model.get_mesh_count()} meshes")
             
             # Step 2: Get original bounds before normalization
-            print("\n[2/5] Recording original bounds...")
             original_bounds = model.get_bounds()
             if original_bounds is None:
-                print("Error: Model has no valid bounds")
+                print(f"Error: Model has no valid bounds: {fbx_path}")
                 return False
             
             original_bounds_min, original_bounds_max = original_bounds
             original_center = (original_bounds_min + original_bounds_max) * 0.5
             original_size = original_bounds_max - original_bounds_min
-            print(f"  Original bounds: min={original_bounds_min}, max={original_bounds_max}")
-            print(f"  Original center: {original_center}")
-            print(f"  Original size: {original_size}")
             
             # Step 3: Normalize whole model
-            print("\n[3/5] Normalizing whole model...")
             model.normalize(self.min_val, self.max_val, self.padding)
             
             # Get normalized bounds
             normalized_bounds = model.get_bounds()
             if normalized_bounds is None:
-                print("Error: Failed to get normalized bounds")
+                print(f"Error: Failed to get normalized bounds: {fbx_path}")
                 return False
             
             normalized_bounds_min, normalized_bounds_max = normalized_bounds
             normalized_center = (normalized_bounds_min + normalized_bounds_max) * 0.5
             normalized_size = normalized_bounds_max - normalized_bounds_min
-            print(f"  Normalized bounds: min={normalized_bounds_min}, max={normalized_bounds_max}")
-            print(f"  Normalized center: {normalized_center}")
-            print(f"  Normalized size: {normalized_size}")
             
             # Calculate normalization parameters
             max_dimension = np.max(original_size)
@@ -134,44 +118,35 @@ class DatasetGenerator:
             
             # Save normalized whole model
             whole_output_path = sample_dir / f"{sample_name}-whole.fbx"
-            print(f"  Saving normalized whole model to: {whole_output_path}")
             if not FbxUtil.save_model(model, output_path=str(whole_output_path), ignore_skeleton=True):
-                print(f"Error: Failed to save whole model")
+                print(f"Error: Failed to save whole model: {whole_output_path}")
                 return False
             
             # Step 4: Split model into parts and process each part
-            print("\n[4/5] Splitting and processing parts...")
             part_models = model.split()
-            print(f"  Split into {len(part_models)} parts")
             
             parts_data = {}
             
             for i, part_model in enumerate(part_models):
                 part_name = part_model.name
-                print(f"\n  Processing part {i+1}/{len(part_models)}: {part_name}")
                 
                 # Get part bounds in whole model's normalized space
                 part_bounds_in_whole = part_model.get_bounds()
                 if part_bounds_in_whole is None:
-                    print(f"    Warning: Part {part_name} has no valid bounds, skipping")
+                    print(f"Warning: Part {part_name} has no valid bounds, skipping: {fbx_path}")
                     continue
                 
                 part_bounds_min_in_whole, part_bounds_max_in_whole = part_bounds_in_whole
                 part_center_in_whole = (part_bounds_min_in_whole + part_bounds_max_in_whole) * 0.5
                 part_size_in_whole = part_bounds_max_in_whole - part_bounds_min_in_whole
                 
-                print(f"    Part bounds in whole space: min={part_bounds_min_in_whole}, max={part_bounds_max_in_whole}")
-                print(f"    Part center in whole space: {part_center_in_whole}")
-                print(f"    Part size in whole space: {part_size_in_whole}")
-                
                 # Normalize part individually
-                print(f"    Normalizing part individually...")
                 part_model.normalize(self.min_val, self.max_val, self.padding)
                 
                 # Get part's own normalization parameters
                 part_normalized_bounds = part_model.get_bounds()
                 if part_normalized_bounds is None:
-                    print(f"    Warning: Failed to get normalized bounds for part {part_name}, skipping")
+                    print(f"Warning: Failed to get normalized bounds for part {part_name}, skipping: {fbx_path}")
                     continue
                 
                 part_normalized_min, part_normalized_max = part_normalized_bounds
@@ -180,9 +155,6 @@ class DatasetGenerator:
                 # Calculate part's normalization scale factor
                 part_max_dimension = np.max(part_size_in_whole)
                 part_scale_factor = effective_range / part_max_dimension if part_max_dimension > 0 else 1.0
-                
-                print(f"    Part normalized bounds: min={part_normalized_min}, max={part_normalized_max}")
-                print(f"    Part scale factor: {part_scale_factor}")
                 
                 # Calculate relative transformation
                 # Translation: part center in whole's normalized space
@@ -195,16 +167,10 @@ class DatasetGenerator:
                 scale_ratio = part_scale_factor / scale_factor if scale_factor > 0 else 1.0
                 scale = np.array([scale_ratio, scale_ratio, scale_ratio])
                 
-                print(f"    Relative transformation:")
-                print(f"      Translation: {translation}")
-                print(f"      Rotation (quat): {rotation}")
-                print(f"      Scale: {scale}")
-                
                 # Save normalized part model
                 part_output_path = sample_dir / f"{sample_name}-{part_name}.fbx"
-                print(f"    Saving normalized part to: {part_output_path}")
                 if not FbxUtil.save_model(part_model, output_path=str(part_output_path), ignore_skeleton=True):
-                    print(f"    Warning: Failed to save part {part_name}")
+                    print(f"Warning: Failed to save part {part_name}: {part_output_path}")
                     continue
                 
                 # Prepare part data
@@ -230,66 +196,74 @@ class DatasetGenerator:
                 part_json_path = sample_dir / f"{sample_name}-{part_name}.json"
                 with open(part_json_path, 'w', encoding='utf-8') as f:
                     json.dump(part_data, f, indent=2, ensure_ascii=False)
-                print(f"    Part JSON saved to: {part_json_path}")
                 
                 # Store part data for summary
                 parts_data[part_name] = part_data
             
-            # Step 5: Summary
-            print(f"\n✓ Successfully processed {sample_name}")
-            print(f"  Output directory: {sample_dir}")
-            print(f"  - Whole model: {whole_output_path.name}")
-            print(f"  - Parts: {len(parts_data)} parts saved")
-            for part_name in parts_data.keys():
-                print(f"    - {sample_name}-{part_name}.fbx")
-                print(f"    - {sample_name}-{part_name}.json")
-            
             return True
             
         except Exception as e:
-            print(f"\nError processing {fbx_path}: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"Error processing {fbx_path}: {e}")
             return False
+
+
+def generate_dataset_task(input_paths: List[Tuple[str, bool]]) -> List[Task]:
+    """
+    Generate all tasks for dataset generation.
     
-    def process_directory(self, input_dir: str, recursive: bool = False) -> Tuple[int, int]:
-        """
-        Process all FBX files in a directory.
+    Args:
+        input_paths: List of (input_path, recursive) tuples
         
-        Args:
-            input_dir: Input directory containing FBX files
-            recursive: Whether to search recursively
-            
-        Returns:
-            Tuple of (success_count, total_count)
-        """
-        input_path = Path(input_dir)
-        if not input_path.exists():
-            print(f"Error: Input directory not found: {input_dir}")
-            return 0, 0
+    Returns:
+        List of Task objects
+    """
+    tasks = []
+    
+    for input_path, recursive in input_paths:
+        input_path_obj = Path(input_path)
+        if not input_path_obj.exists():
+            print(f"Warning: Input path does not exist: {input_path}")
+            continue
         
         # Find all FBX files
         if recursive:
-            fbx_files = list(input_path.rglob("*.fbx"))
+            fbx_files = list(input_path_obj.rglob("*.fbx"))
         else:
-            fbx_files = list(input_path.glob("*.fbx"))
+            fbx_files = list(input_path_obj.glob("*.fbx"))
         
-        if not fbx_files:
-            print(f"No FBX files found in: {input_dir}")
-            return 0, 0
+        # Create task for each FBX file
+        for fbx_file in fbx_files:
+            task = Task(
+                task_id=str(fbx_file),
+                data={
+                    'fbx_path': str(fbx_file)
+                }
+            )
+            tasks.append(task)
+    
+    return tasks
+
+
+def build_data(task_data: Dict) -> bool:
+    """
+    Execute data processing for a single FBX file.
+    This function is called by worker processes.
+    
+    Args:
+        task_data: Dictionary containing 'fbx_path', 'output_dir', and 'padding'
         
-        print(f"\nFound {len(fbx_files)} FBX files to process")
-        
-        success_count = 0
-        for i, fbx_file in enumerate(fbx_files, 1):
-            print(f"\n{'='*60}")
-            print(f"Processing file {i}/{len(fbx_files)}")
-            print(f"{'='*60}")
-            
-            if self.process_fbx_file(str(fbx_file)):
-                success_count += 1
-        
-        return success_count, len(fbx_files)
+    Returns:
+        True if processing successful, False otherwise
+    """
+    fbx_path = task_data['fbx_path']
+    output_dir = task_data['output_dir']
+    padding = task_data['padding']
+    
+    # Create generator for this task
+    generator = DatasetGenerator(output_dir, padding=padding)
+    
+    # Process the FBX file
+    return generator.process_fbx_file(fbx_path)
 
 
 def main():
@@ -327,8 +301,20 @@ Examples:
         help="Padding ratio for normalization (default: 0.01)"
     )
     parser.add_argument(
-        "--name",
-        help="Custom sample name (only for single file processing)"
+        "--parallel",
+        action="store_true",
+        help="Use parallel processing with multiple processes"
+    )
+    parser.add_argument(
+        "--num-processes",
+        type=int,
+        default=None,
+        help="Number of worker processes (default: CPU count)"
+    )
+    parser.add_argument(
+        "--checkpoint",
+        default="checkpoint_dataset.json",
+        help="Checkpoint file for resume capability (default: checkpoint_dataset.json)"
     )
     
     args = parser.parse_args()
@@ -338,38 +324,71 @@ Examples:
         print("Error: Padding must be between 0.0 and 0.5")
         return 1
     
-    # Create generator
-    generator = DatasetGenerator(args.output, padding=args.padding)
-    
-    # Check if input is file or directory
-    input_paths = (
+    # Define input paths
+    input_paths = [
         ('d:/Data/ShadowUnit', False), 
         ('d:/Data/DiabloChar/Processed', True), 
         ('d:/Data/models_gta5.peds_only/models/peds', True), 
         ('d:/Data/models_rdr2.peds_only/models/peds', True), 
-        )
+    ]
     
-    for input_path, recursive in input_paths:
-        # Process directory
-        if args.name:
-            print("Warning: --name argument is ignored when processing a directory")
+    if args.parallel:
+        # Use parallel processing with ParallelTasks framework
         
-        success_count, total_count = generator.process_directory(
-            str(input_path),
-            recursive=recursive
+        # Create parallel tasks framework
+        parallel_tasks = ParallelTasks(
+            task_func=build_data,
+            checkpoint_file=args.checkpoint,
+            num_processes=args.num_processes
         )
         
-        print(f"\n{'='*60}")
-        print(f"PROCESSING COMPLETE")
-        print(f"{'='*60}")
-        print(f"Successfully processed: {success_count}/{total_count} files")
-        print(f"Output directory: {generator.output_dir}")
+        # Generate tasks with output_dir and padding included
+        def task_generator():
+            tasks = generate_dataset_task(input_paths)
+            # Add output_dir and padding to each task's data
+            for task in tasks:
+                task.data['output_dir'] = args.output
+                task.data['padding'] = args.padding
+            return tasks
         
-        return 0 if success_count == total_count else 1
+        parallel_tasks.create_tasks(task_generator)
+        
+        # Run tasks
+        stats = parallel_tasks.run()
+        
+        print(f"\nProcessing complete: {stats['completed']}/{stats['total_tasks']} succeeded, {stats['failed']} failed, {stats['skipped']} skipped")
+        if stats['failed'] > 0:
+            print(f"Warning: {stats['failed']} tasks failed")
+        
+        return 0 if stats['failed'] == 0 else 1
         
     else:
-        print(f"Error: Input path does not exist: {args.input}")
-        return 1
+        # Use sequential processing
+        # Generate all tasks
+        tasks = generate_dataset_task(input_paths)
+        
+        if not tasks:
+            print("Error: No FBX files found to process")
+            return 1
+        
+        # Process tasks sequentially
+        success_count = 0
+        for i, task in enumerate(tasks, 1):
+            print(f"Processing task {i}/{len(tasks)}: {task.task_id}")
+            # Prepare task data
+            task_data = task.data.copy()
+            task_data['output_dir'] = args.output
+            task_data['padding'] = args.padding
+            
+            # Execute task
+            if build_data(task_data):
+                success_count += 1
+        
+        print(f"\nProcessing complete: {success_count}/{len(tasks)} succeeded")
+        if success_count < len(tasks):
+            print(f"Warning: {len(tasks) - success_count} tasks failed")
+        
+        return 0 if success_count == len(tasks) else 1
 
 
 if __name__ == "__main__":
