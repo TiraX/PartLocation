@@ -824,6 +824,16 @@ class FbxUtil:
         """
         material = Material(fbx_material.GetName())
         
+        # Parse texture parameters from FBX material properties
+        self._parse_material_textures(fbx_material.Diffuse, material, TextureType.DIFFUSE)
+        self._parse_material_textures(fbx_material.NormalMap, material, TextureType.NORMAL)
+        self._parse_material_textures(fbx_material.Shininess, material, TextureType.ROUGHNESS)
+        self._parse_material_textures(fbx_material.ReflectionFactor, material, TextureType.METALLIC)
+        self._parse_material_textures(fbx_material.Specular, material, TextureType.SPECULAR)
+        self._parse_material_textures(fbx_material.Emissive, material, TextureType.EMISSIVE)
+        self._parse_material_textures(fbx_material.AmbientFactor, material, TextureType.AMBIENT_OCCLUSION)
+        self._parse_material_textures(fbx_material.TransparencyFactor, material, TextureType.OPACITY)
+        
         return material
     
     def _parse_material_textures(self, fbx_property, material: Material, texture_type: TextureType):
@@ -841,8 +851,8 @@ class FbxUtil:
             texture = fbx_property.GetSrcObject(i)
             
             if texture and texture.GetClassId().Is(fbx.FbxFileTexture.ClassId):
-                file_texture = fbx.FbxFileTexture.Cast(texture)
-                texture_path = file_texture.GetFileName()
+                # Directly use texture object instead of Cast
+                texture_path = texture.GetFileName()
                 
                 if texture_path:
                     texture_name = f"{texture_type.name.lower()}_texture"
