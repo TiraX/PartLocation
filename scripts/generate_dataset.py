@@ -82,6 +82,9 @@ class DatasetGenerator:
             if model is None:
                 print(f"Error: Failed to load FBX file: {fbx_path}")
                 return False
+            if len(model.meshes) == 1:
+                print(f"Warning: Model has only 1 mesh, skipping processing")
+                return False
             print(f"  Loaded model with {model.get_mesh_count()} meshes")
             
             # Step 2: Get original bounds before normalization
@@ -308,10 +311,6 @@ Examples:
     )
     
     parser.add_argument(
-        "input",
-        help="Input FBX file or directory containing FBX files"
-    )
-    parser.add_argument(
         "-o", "--output",
         required=True,
         help="Output directory for processed data"
@@ -343,25 +342,21 @@ Examples:
     generator = DatasetGenerator(args.output, padding=args.padding)
     
     # Check if input is file or directory
-    input_path = Path(args.input)
+    input_paths = (
+        ('d:/Data/ShadowUnit', False), 
+        ('d:/Data/DiabloChar/Processed', True), 
+        ('d:/Data/models_gta5.peds_only/models/peds', True), 
+        ('d:/Data/models_rdr2.peds_only/models/peds', True), 
+        )
     
-    if input_path.is_file():
-        # Process single file
-        if not input_path.suffix.lower() == ".fbx":
-            print(f"Error: Input file must be an FBX file: {args.input}")
-            return 1
-        
-        success = generator.process_fbx_file(str(input_path), sample_name=args.name)
-        return 0 if success else 1
-        
-    elif input_path.is_dir():
+    for input_path, recursive in input_paths:
         # Process directory
         if args.name:
             print("Warning: --name argument is ignored when processing a directory")
         
         success_count, total_count = generator.process_directory(
             str(input_path),
-            recursive=args.recursive
+            recursive=recursive
         )
         
         print(f"\n{'='*60}")
