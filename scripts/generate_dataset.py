@@ -227,6 +227,10 @@ def create_mesh_from_faces(original_mesh: Mesh, face_indices: List[int], name: s
     
     # Create vertex index mapping (old index -> new index)
     vertex_mapping = {old_idx: new_idx for new_idx, old_idx in enumerate(vertex_indices)}
+
+    # Keep deterministic face order and support section remap
+    face_indices_sorted = sorted(face_indices)
+    old_face_to_new_face = {old_fi: new_fi for new_fi, old_fi in enumerate(face_indices_sorted)}
     
     # Create new mesh
     new_mesh = Mesh(name)
@@ -240,18 +244,49 @@ def create_mesh_from_faces(original_mesh: Mesh, face_indices: List[int], name: s
     
     # Create new faces with remapped indices
     new_faces = []
-    for face_idx in face_indices:
+    for face_idx in face_indices_sorted:
         old_face = original_faces[face_idx]
-        new_face = [vertex_mapping[old_idx] for old_idx in old_face]
+        new_face = [vertex_mapping[int(old_idx)] for old_idx in old_face]
         new_faces.append(new_face)
     
-    new_mesh.faces = np.array(new_faces)
+    new_mesh.faces = np.asarray(new_faces, dtype=np.int32)
     
     # Copy materials
     for material in original_mesh.materials:
         new_mesh.add_material(material.copy())
-    
-    # Note: Sections are not copied as they may not be valid for the new mesh
+
+    # Rebuild sections so per-polygon material assignment works during FBX export
+    original_sections = original_mesh.get_sections()
+    if not original_sections:
+        # No section info -> single section covering all faces
+        new_mesh.add_section(0, int(new_mesh.get_face_count()), 0)
+        return new_mesh
+
+    # Build old face -> material_index mapping using original sections
+    old_face_to_mat: Dict[int, int] = {}
+    for section in original_sections:
+        start_face = int(section.get('start_face', 0))
+        face_count = int(section.get('face_count', 0))
+        mat_idx = int(section.get('material_index', 0))
+        end_face = start_face + face_count
+        for fi in range(start_face, end_face):
+            old_face_to_mat[fi] = mat_idx
+
+    # Create per-face material index list for the new face order
+    new_face_mats = np.empty(len(face_indices_sorted), dtype=np.int32)
+    for new_fi, old_fi in enumerate(face_indices_sorted):
+        new_face_mats[new_fi] = int(old_face_to_mat.get(int(old_fi), 0))
+
+    # Compress consecutive faces with same material into sections
+    current_mat = int(new_face_mats[0])
+    section_start = 0
+    for i in range(1, len(new_face_mats)):
+        mat_i = int(new_face_mats[i])
+        if mat_i != current_mat:
+            new_mesh.add_section(section_start, i - section_start, current_mat)
+            section_start = i
+            current_mat = mat_i
+    new_mesh.add_section(section_start, len(new_face_mats) - section_start, current_mat)
     
     return new_mesh
 
