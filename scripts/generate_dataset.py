@@ -1,391 +1,381 @@
 """
-Dataset generation script.
+Generate dataset from FBX files.
 
-This script orchestrates the complete dataset generation process:
-1. Load 3D models
-2. Render multi-view images
-3. Extract transformation parameters
-4. Organize into train/val/test splits
-5. Apply data augmentation
-
-Usage:
-    python generate_dataset.py --config configs/dataset_config.yaml
+This script processes FBX files to create training data:
+1. Load FBX model
+2. Normalize whole model to [-0.5, 0.5] with padding
+3. Split model into parts
+4. Normalize each part individually
+5. Calculate relative transformation parameters
+6. Save normalized models and transformation parameters
 """
 
-import argparse
-import subprocess
-import random
-import shutil
-from pathlib import Path
-from typing import List, Dict, Tuple
+import sys
 import json
-from tqdm import tqdm
+import argparse
+from pathlib import Path
+from typing import Dict, List, Tuple, Optional
+import numpy as np
+from scipy.spatial.transform import Rotation as R
+
+# Add mesh_dump to path
+sys.path.insert(0, str(Path(__file__).parent))
+
+from mesh_dump.fbx_utils import FbxUtil
+from mesh_dump.model import Model
+from mesh_dump.mesh import Mesh
 
 
 class DatasetGenerator:
-    """Generate training dataset from 3D models."""
+    """Generate training dataset from FBX files."""
     
-    def __init__(self, config: dict):
-        """Initialize dataset generator.
+    def __init__(self, output_dir: str, padding: float = 0.01):
+        """
+        Initialize dataset generator.
         
         Args:
-            config: Configuration dictionary
+            output_dir: Output directory for processed data
+            padding: Padding ratio for normalization (default: 0.01)
         """
-        self.config = config
-        self.blender_path = config.get('blender_path', 'blender')
-        self.output_dir = Path(config['output_dir'])
-        self.models_dir = Path(config['models_dir'])
+        self.output_dir = Path(output_dir)
+        self.padding = padding
+        self.min_val = -0.5
+        self.max_val = 0.5
         
-        # Dataset splits
-        self.train_ratio = config.get('train_ratio', 0.7)
-        self.val_ratio = config.get('val_ratio', 0.15)
-        self.test_ratio = config.get('test_ratio', 0.15)
+        # Create output directory
+        self.output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Rendering settings
-        self.views = config.get('views', ['front', 'back', 'left', 'right'])
-        self.combine_mode = config.get('combine_mode', 'grid')
-        self.resolution = config.get('resolution', 512)
-        
-        # Data augmentation
-        self.augmentation = config.get('augmentation', {})
-        self.elevation_range = self.augmentation.get('elevation_range', [-10, 10])
-        self.azimuth_range = self.augmentation.get('azimuth_range', [-10, 10])
-        
-        # Create output directories
-        self.setup_directories()
-        
-    def setup_directories(self):
-        """Create output directory structure."""
-        for split in ['train', 'val', 'test']:
-            split_dir = self.output_dir / split
-            split_dir.mkdir(parents=True, exist_ok=True)
-            
-    def get_model_files(self) -> List[Path]:
-        """Get list of 3D model files.
-        
-        Returns:
-            List of model file paths
+    def process_fbx_file(self, fbx_path: str, sample_name: Optional[str] = None) -> bool:
         """
-        model_extensions = ['.blend', '.obj', '.fbx', '.gltf', '.glb']
-        model_files = []
-        
-        for ext in model_extensions:
-            model_files.extend(self.models_dir.glob(f'**/*{ext}'))
-            
-        return sorted(model_files)
-        
-    def split_dataset(self, num_samples: int) -> Dict[str, List[int]]:
-        """Split dataset into train/val/test.
+        Process a single FBX file.
         
         Args:
-            num_samples: Total number of samples
+            fbx_path: Path to FBX file
+            sample_name: Optional custom sample name (default: use filename)
             
         Returns:
-            Dictionary mapping split names to sample indices
+            True if processing successful, False otherwise
         """
-        indices = list(range(num_samples))
-        random.shuffle(indices)
+        fbx_path = Path(fbx_path)
+        if not fbx_path.exists():
+            print(f"Error: FBX file not found: {fbx_path}")
+            return False
         
-        train_size = int(num_samples * self.train_ratio)
-        val_size = int(num_samples * self.val_ratio)
+        # Use filename as sample name if not provided
+        if sample_name is None:
+            sample_name = fbx_path.stem
         
-        splits = {
-            'train': indices[:train_size],
-            'val': indices[train_size:train_size + val_size],
-            'test': indices[train_size + val_size:]
-        }
+        print(f"\n{'='*60}")
+        print(f"Processing: {fbx_path.name}")
+        print(f"Sample name: {sample_name}")
+        print(f"{'='*60}")
         
-        return splits
-        
-    def generate_augmentation_params(self) -> Dict[str, float]:
-        """Generate random augmentation parameters.
-        
-        Returns:
-            Dictionary with augmentation parameters
-        """
-        params = {}
-        
-        if self.augmentation.get('enable_elevation', True):
-            params['elevation'] = random.uniform(*self.elevation_range)
-        else:
-            params['elevation'] = 0.0
-            
-        if self.augmentation.get('enable_azimuth', True):
-            params['azimuth_offset'] = random.uniform(*self.azimuth_range)
-        else:
-            params['azimuth_offset'] = 0.0
-            
-        return params
-        
-    def render_sample(self, model_path: Path, sample_id: str, output_dir: Path,
-                     augmentation_params: Dict[str, float]) -> Dict[str, Path]:
-        """Render a single sample.
-        
-        Args:
-            model_path: Path to 3D model file
-            sample_id: Sample identifier
-            output_dir: Output directory for this sample
-            augmentation_params: Augmentation parameters
-            
-        Returns:
-            Dictionary with paths to rendered images
-        """
         # Create sample directory
-        sample_dir = output_dir / sample_id
+        sample_dir = self.output_dir / sample_name
         sample_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Prepare Blender command
-        render_script = Path(__file__).parent / 'blender_render.py'
-        
-        cmd = [
-            self.blender_path,
-            str(model_path),
-            '--background',
-            '--python', str(render_script),
-            '--',
-            str(sample_dir),
-            str(self.resolution),
-            ','.join(self.views),
-            self.combine_mode,
-            str(augmentation_params['elevation']),
-            str(augmentation_params['azimuth_offset'])
-        ]
-        
-        # Run Blender rendering
-        try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0:
-                print(f"Error rendering {sample_id}: {result.stderr}")
-                return None
-        except subprocess.TimeoutExpired:
-            print(f"Timeout rendering {sample_id}")
-            return None
-            
-        return {'sample_dir': sample_dir}
-        
-    def extract_transforms(self, model_path: Path, sample_id: str, 
-                          output_dir: Path) -> Dict:
-        """Extract transformation parameters.
-        
-        Args:
-            model_path: Path to 3D model file
-            sample_id: Sample identifier
-            output_dir: Output directory
-            
-        Returns:
-            Dictionary with transformation data
-        """
-        sample_dir = output_dir / sample_id
-        transform_path = sample_dir / 'transforms.json'
-        
-        # Prepare Blender command
-        extract_script = Path(__file__).parent / 'extract_transforms.py'
-        
-        # Note: You need to specify whole_name and part_names based on your model
-        # This is a placeholder - adjust based on your model structure
-        cmd = [
-            self.blender_path,
-            str(model_path),
-            '--background',
-            '--python', str(extract_script),
-            '--',
-            'whole_object',  # Replace with actual whole object name
-            str(transform_path)
-        ]
+        print(f"Output directory: {sample_dir}")
         
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-            if result.returncode != 0:
-                print(f"Error extracting transforms for {sample_id}: {result.stderr}")
-                return None
-        except subprocess.TimeoutExpired:
-            print(f"Timeout extracting transforms for {sample_id}")
-            return None
+            # Step 1: Load FBX model
+            print("\n[1/5] Loading FBX model...")
+            model = FbxUtil.load_model(str(fbx_path), ignore_skeleton=True)
+            if model is None:
+                print(f"Error: Failed to load FBX file: {fbx_path}")
+                return False
+            print(f"  Loaded model with {model.get_mesh_count()} meshes")
             
-        # Load and return transforms
-        if transform_path.exists():
-            with open(transform_path, 'r') as f:
-                return json.load(f)
-        return None
-        
-    def generate_sample(self, model_path: Path, sample_idx: int, 
-                       split: str) -> bool:
-        """Generate a single dataset sample.
-        
-        Args:
-            model_path: Path to 3D model file
-            sample_idx: Sample index
-            split: Dataset split (train/val/test)
+            # Step 2: Get original bounds before normalization
+            print("\n[2/5] Recording original bounds...")
+            original_bounds = model.get_bounds()
+            if original_bounds is None:
+                print("Error: Model has no valid bounds")
+                return False
             
-        Returns:
-            True if successful, False otherwise
-        """
-        sample_id = f"sample_{sample_idx:06d}"
-        output_dir = self.output_dir / split
-        
-        # Generate augmentation parameters
-        aug_params = self.generate_augmentation_params()
-        
-        # Render images
-        render_result = self.render_sample(model_path, sample_id, output_dir, aug_params)
-        if render_result is None:
-            return False
+            original_bounds_min, original_bounds_max = original_bounds
+            original_center = (original_bounds_min + original_bounds_max) * 0.5
+            original_size = original_bounds_max - original_bounds_min
+            print(f"  Original bounds: min={original_bounds_min}, max={original_bounds_max}")
+            print(f"  Original center: {original_center}")
+            print(f"  Original size: {original_size}")
             
-        # Extract transforms
-        transforms = self.extract_transforms(model_path, sample_id, output_dir)
-        if transforms is None:
-            return False
+            # Step 3: Normalize whole model
+            print("\n[3/5] Normalizing whole model...")
+            model.normalize(self.min_val, self.max_val, self.padding)
             
-        # Save metadata
-        metadata = {
-            'sample_id': sample_id,
-            'model_path': str(model_path),
-            'split': split,
-            'views': self.views,
-            'augmentation': aug_params,
-            'transforms': transforms
-        }
-        
-        metadata_path = output_dir / sample_id / 'metadata.json'
-        with open(metadata_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
+            # Get normalized bounds
+            normalized_bounds = model.get_bounds()
+            if normalized_bounds is None:
+                print("Error: Failed to get normalized bounds")
+                return False
             
-        return True
-        
-    def generate_dataset(self, num_samples: int):
-        """Generate complete dataset.
-        
-        Args:
-            num_samples: Total number of samples to generate
-        """
-        print(f"Generating dataset with {num_samples} samples...")
-        
-        # Get model files
-        model_files = self.get_model_files()
-        if not model_files:
-            raise ValueError(f"No model files found in {self.models_dir}")
+            normalized_bounds_min, normalized_bounds_max = normalized_bounds
+            normalized_center = (normalized_bounds_min + normalized_bounds_max) * 0.5
+            normalized_size = normalized_bounds_max - normalized_bounds_min
+            print(f"  Normalized bounds: min={normalized_bounds_min}, max={normalized_bounds_max}")
+            print(f"  Normalized center: {normalized_center}")
+            print(f"  Normalized size: {normalized_size}")
             
-        print(f"Found {len(model_files)} model files")
-        
-        # Split dataset
-        splits = self.split_dataset(num_samples)
-        print(f"Dataset splits: train={len(splits['train'])}, "
-              f"val={len(splits['val'])}, test={len(splits['test'])}")
-        
-        # Generate samples
-        sample_idx = 0
-        for split_name, indices in splits.items():
-            print(f"\nGenerating {split_name} split...")
+            # Calculate normalization parameters
+            max_dimension = np.max(original_size)
+            target_range = self.max_val - self.min_val
+            effective_range = target_range * (1.0 - 2.0 * self.padding)
+            scale_factor = effective_range / max_dimension if max_dimension > 0 else 1.0
             
-            success_count = 0
-            for idx in tqdm(indices, desc=split_name):
-                # Cycle through model files
-                model_path = model_files[idx % len(model_files)]
-                
-                if self.generate_sample(model_path, sample_idx, split_name):
-                    success_count += 1
-                    
-                sample_idx += 1
-                
-            print(f"{split_name}: {success_count}/{len(indices)} samples generated successfully")
-            
-        # Generate dataset statistics
-        self.generate_statistics()
-        
-    def generate_statistics(self):
-        """Generate and save dataset statistics."""
-        stats = {
-            'splits': {}
-        }
-        
-        for split in ['train', 'val', 'test']:
-            split_dir = self.output_dir / split
-            samples = list(split_dir.glob('sample_*'))
-            
-            stats['splits'][split] = {
-                'num_samples': len(samples),
-                'samples': [s.name for s in samples]
+            whole_normalization = {
+                "original_center": original_center.tolist(),
+                "original_size": original_size.tolist(),
+                "scale_factor": float(scale_factor),
+                "target_range": [self.min_val, self.max_val],
+                "padding": self.padding
             }
             
-        stats_path = self.output_dir / 'dataset_stats.json'
-        with open(stats_path, 'w') as f:
-            json.dump(stats, f, indent=2)
+            # Save normalized whole model
+            whole_output_path = sample_dir / f"{sample_name}-whole.fbx"
+            print(f"  Saving normalized whole model to: {whole_output_path}")
+            if not FbxUtil.save_model(model, output_path=str(whole_output_path), ignore_skeleton=True):
+                print(f"Error: Failed to save whole model")
+                return False
             
-        print(f"\nDataset statistics saved to {stats_path}")
-        
-    def validate_dataset(self):
-        """Validate generated dataset."""
-        print("\nValidating dataset...")
-        
-        issues = []
-        
-        for split in ['train', 'val', 'test']:
-            split_dir = self.output_dir / split
-            samples = list(split_dir.glob('sample_*'))
+            # Step 4: Split model into parts and process each part
+            print("\n[4/5] Splitting and processing parts...")
+            part_models = model.split()
+            print(f"  Split into {len(part_models)} parts")
             
-            for sample_dir in samples:
-                # Check for required files
-                required_files = ['metadata.json', 'transforms.json']
+            parts_data = {}
+            
+            for i, part_model in enumerate(part_models):
+                part_name = part_model.name
+                print(f"\n  Processing part {i+1}/{len(part_models)}: {part_name}")
                 
-                for filename in required_files:
-                    filepath = sample_dir / filename
-                    if not filepath.exists():
-                        issues.append(f"Missing {filename} in {sample_dir.name}")
-                        
-        if issues:
-            print(f"Found {len(issues)} issues:")
-            for issue in issues[:10]:  # Show first 10 issues
-                print(f"  - {issue}")
+                # Get part bounds in whole model's normalized space
+                part_bounds_in_whole = part_model.get_bounds()
+                if part_bounds_in_whole is None:
+                    print(f"    Warning: Part {part_name} has no valid bounds, skipping")
+                    continue
+                
+                part_bounds_min_in_whole, part_bounds_max_in_whole = part_bounds_in_whole
+                part_center_in_whole = (part_bounds_min_in_whole + part_bounds_max_in_whole) * 0.5
+                part_size_in_whole = part_bounds_max_in_whole - part_bounds_min_in_whole
+                
+                print(f"    Part bounds in whole space: min={part_bounds_min_in_whole}, max={part_bounds_max_in_whole}")
+                print(f"    Part center in whole space: {part_center_in_whole}")
+                print(f"    Part size in whole space: {part_size_in_whole}")
+                
+                # Normalize part individually
+                print(f"    Normalizing part individually...")
+                part_model.normalize(self.min_val, self.max_val, self.padding)
+                
+                # Get part's own normalization parameters
+                part_normalized_bounds = part_model.get_bounds()
+                if part_normalized_bounds is None:
+                    print(f"    Warning: Failed to get normalized bounds for part {part_name}, skipping")
+                    continue
+                
+                part_normalized_min, part_normalized_max = part_normalized_bounds
+                part_normalized_center = (part_normalized_min + part_normalized_max) * 0.5
+                
+                # Calculate part's normalization scale factor
+                part_max_dimension = np.max(part_size_in_whole)
+                part_scale_factor = effective_range / part_max_dimension if part_max_dimension > 0 else 1.0
+                
+                print(f"    Part normalized bounds: min={part_normalized_min}, max={part_normalized_max}")
+                print(f"    Part scale factor: {part_scale_factor}")
+                
+                # Calculate relative transformation
+                # Translation: part center in whole's normalized space
+                translation = part_center_in_whole
+                
+                # Rotation: identity (no rotation in this simple case)
+                rotation = np.array([1.0, 0.0, 0.0, 0.0])  # [qw, qx, qy, qz]
+                
+                # Scale: ratio of part's scale to whole's scale
+                scale_ratio = part_scale_factor / scale_factor if scale_factor > 0 else 1.0
+                scale = np.array([scale_ratio, scale_ratio, scale_ratio])
+                
+                print(f"    Relative transformation:")
+                print(f"      Translation: {translation}")
+                print(f"      Rotation (quat): {rotation}")
+                print(f"      Scale: {scale}")
+                
+                # Save normalized part model
+                part_output_path = sample_dir / f"{sample_name}-{part_name}.fbx"
+                print(f"    Saving normalized part to: {part_output_path}")
+                if not FbxUtil.save_model(part_model, output_path=str(part_output_path), ignore_skeleton=True):
+                    print(f"    Warning: Failed to save part {part_name}")
+                    continue
+                
+                # Prepare part data
+                part_data = {
+                    "model_name": sample_name,
+                    "part_name": part_name,
+                    "translation": translation.tolist(),
+                    "rotation": rotation.tolist(),
+                    "scale": scale.tolist(),
+                    "part_normalization": {
+                        "original_center_in_whole": part_center_in_whole.tolist(),
+                        "original_size_in_whole": part_size_in_whole.tolist(),
+                        "scale_factor": float(part_scale_factor)
+                    },
+                    "bounds_in_whole": {
+                        "min": part_bounds_min_in_whole.tolist(),
+                        "max": part_bounds_max_in_whole.tolist()
+                    },
+                    "whole_normalization": whole_normalization
+                }
+                
+                # Save part JSON
+                part_json_path = sample_dir / f"{sample_name}-{part_name}.json"
+                with open(part_json_path, 'w', encoding='utf-8') as f:
+                    json.dump(part_data, f, indent=2, ensure_ascii=False)
+                print(f"    Part JSON saved to: {part_json_path}")
+                
+                # Store part data for summary
+                parts_data[part_name] = part_data
+            
+            # Step 5: Summary
+            print(f"\n✓ Successfully processed {sample_name}")
+            print(f"  Output directory: {sample_dir}")
+            print(f"  - Whole model: {whole_output_path.name}")
+            print(f"  - Parts: {len(parts_data)} parts saved")
+            for part_name in parts_data.keys():
+                print(f"    - {sample_name}-{part_name}.fbx")
+                print(f"    - {sample_name}-{part_name}.json")
+            
+            return True
+            
+        except Exception as e:
+            print(f"\nError processing {fbx_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def process_directory(self, input_dir: str, recursive: bool = False) -> Tuple[int, int]:
+        """
+        Process all FBX files in a directory.
+        
+        Args:
+            input_dir: Input directory containing FBX files
+            recursive: Whether to search recursively
+            
+        Returns:
+            Tuple of (success_count, total_count)
+        """
+        input_path = Path(input_dir)
+        if not input_path.exists():
+            print(f"Error: Input directory not found: {input_dir}")
+            return 0, 0
+        
+        # Find all FBX files
+        if recursive:
+            fbx_files = list(input_path.rglob("*.fbx"))
         else:
-            print("Dataset validation passed!")
-
-
-def load_config(config_path: str) -> dict:
-    """Load configuration from YAML file.
-    
-    Args:
-        config_path: Path to config file
+            fbx_files = list(input_path.glob("*.fbx"))
         
-    Returns:
-        Configuration dictionary
-    """
-    import yaml
-    
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
+        if not fbx_files:
+            print(f"No FBX files found in: {input_dir}")
+            return 0, 0
         
-    return config
+        print(f"\nFound {len(fbx_files)} FBX files to process")
+        
+        success_count = 0
+        for i, fbx_file in enumerate(fbx_files, 1):
+            print(f"\n{'='*60}")
+            print(f"Processing file {i}/{len(fbx_files)}")
+            print(f"{'='*60}")
+            
+            if self.process_fbx_file(str(fbx_file)):
+                success_count += 1
+        
+        return success_count, len(fbx_files)
 
 
 def main():
-    """Main function."""
-    parser = argparse.ArgumentParser(description='Generate dataset from 3D models')
-    parser.add_argument('--config', type=str, required=True,
-                       help='Path to configuration file')
-    parser.add_argument('--num-samples', type=int, default=None,
-                       help='Number of samples to generate (overrides config)')
-    parser.add_argument('--validate-only', action='store_true',
-                       help='Only validate existing dataset')
+    """Main function for command-line usage."""
+    parser = argparse.ArgumentParser(
+        description="Generate training dataset from FBX files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Process a single FBX file
+  python generate_dataset.py input.fbx -o output_dir
+  
+  # Process all FBX files in a directory
+  python generate_dataset.py input_dir/ -o output_dir
+  
+  # Process recursively with custom padding
+  python generate_dataset.py input_dir/ -o output_dir -r --padding 0.02
+        """
+    )
+    
+    parser.add_argument(
+        "input",
+        help="Input FBX file or directory containing FBX files"
+    )
+    parser.add_argument(
+        "-o", "--output",
+        required=True,
+        help="Output directory for processed data"
+    )
+    parser.add_argument(
+        "-r", "--recursive",
+        action="store_true",
+        help="Search for FBX files recursively in subdirectories"
+    )
+    parser.add_argument(
+        "--padding",
+        type=float,
+        default=0.01,
+        help="Padding ratio for normalization (default: 0.01)"
+    )
+    parser.add_argument(
+        "--name",
+        help="Custom sample name (only for single file processing)"
+    )
     
     args = parser.parse_args()
     
-    # Load configuration
-    config = load_config(args.config)
+    # Validate padding
+    if not 0.0 <= args.padding < 0.5:
+        print("Error: Padding must be between 0.0 and 0.5")
+        return 1
     
-    # Override num_samples if specified
-    if args.num_samples is not None:
-        config['num_samples'] = args.num_samples
-        
     # Create generator
-    generator = DatasetGenerator(config)
+    generator = DatasetGenerator(args.output, padding=args.padding)
     
-    if args.validate_only:
-        generator.validate_dataset()
+    # Check if input is file or directory
+    input_path = Path(args.input)
+    
+    if input_path.is_file():
+        # Process single file
+        if not input_path.suffix.lower() == ".fbx":
+            print(f"Error: Input file must be an FBX file: {args.input}")
+            return 1
+        
+        success = generator.process_fbx_file(str(input_path), sample_name=args.name)
+        return 0 if success else 1
+        
+    elif input_path.is_dir():
+        # Process directory
+        if args.name:
+            print("Warning: --name argument is ignored when processing a directory")
+        
+        success_count, total_count = generator.process_directory(
+            str(input_path),
+            recursive=args.recursive
+        )
+        
+        print(f"\n{'='*60}")
+        print(f"PROCESSING COMPLETE")
+        print(f"{'='*60}")
+        print(f"Successfully processed: {success_count}/{total_count} files")
+        print(f"Output directory: {generator.output_dir}")
+        
+        return 0 if success_count == total_count else 1
+        
     else:
-        num_samples = config.get('num_samples', 1000)
-        generator.generate_dataset(num_samples)
-        generator.validate_dataset()
+        print(f"Error: Input path does not exist: {args.input}")
+        return 1
 
 
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    sys.exit(main())
