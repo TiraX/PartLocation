@@ -20,6 +20,8 @@ import time
 import numpy as np
 from scipy.spatial.transform import Rotation as R
 
+from numba import njit
+
 # Add mesh_dump to path
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -29,154 +31,171 @@ from mesh_dump.mesh import Mesh
 from mesh_dump.parallel_tasks import ParallelTasks, Task
 
 
+@njit(cache=True)
+def _dsu_find(parent: np.ndarray, x: int) -> int:
+    while parent[x] != x:
+        parent[x] = parent[parent[x]]
+        x = parent[x]
+    return x
+
+
+@njit(cache=True)
+def _dsu_union(parent: np.ndarray, rank: np.ndarray, a: int, b: int) -> None:
+    ra = _dsu_find(parent, a)
+    rb = _dsu_find(parent, b)
+    if ra == rb:
+        return
+    if rank[ra] < rank[rb]:
+        parent[ra] = rb
+    elif rank[ra] > rank[rb]:
+        parent[rb] = ra
+    else:
+        parent[rb] = ra
+        rank[ra] += 1
+
+
+@njit(cache=True)
+def _dsu_union_face_by_vertex_incidence(parent: np.ndarray, rank: np.ndarray, offsets: np.ndarray, face_ids: np.ndarray) -> None:
+    """Union faces that share the same vertex.
+
+    offsets: (num_vertices+1,) prefix sum, faces for vertex v are face_ids[offsets[v]:offsets[v+1]]
+    face_ids: flattened face indices
+    """
+    nv = offsets.shape[0] - 1
+    for v in range(nv):
+        start = offsets[v]
+        end = offsets[v + 1]
+        if end - start <= 1:
+            continue
+        base = face_ids[start]
+        for k in range(start + 1, end):
+            _dsu_union(parent, rank, base, face_ids[k])
+
+
+@njit(cache=True)
+def _aabb_dsu_group(parent: np.ndarray, rank: np.ndarray, bmin: np.ndarray, bmax: np.ndarray) -> None:
+    c = bmin.shape[0]
+    for i in range(c):
+        min_i0 = bmin[i, 0]
+        min_i1 = bmin[i, 1]
+        min_i2 = bmin[i, 2]
+        max_i0 = bmax[i, 0]
+        max_i1 = bmax[i, 1]
+        max_i2 = bmax[i, 2]
+        for j in range(i + 1, c):
+            if (min_i0 <= bmax[j, 0] and max_i0 >= bmin[j, 0] and
+                min_i1 <= bmax[j, 1] and max_i1 >= bmin[j, 1] and
+                min_i2 <= bmax[j, 2] and max_i2 >= bmin[j, 2]):
+                _dsu_union(parent, rank, i, j)
+
+
 def find_connected_components(faces: np.ndarray, num_vertices: int) -> List[List[int]]:
     """
     Find connected components in a mesh based on shared vertices.
-    
-    Args:
-        faces: Face indices array (Nx3 for triangles)
-        num_vertices: Total number of vertices
-        
-    Returns:
-        List of connected components, each component is a list of face indices
+
+    This is optimized vs the original BFS implementation.
+    If numba is available, union operations run in nopython mode.
     """
-    # Build adjacency list for faces
-    # Two faces are adjacent if they share at least one vertex
-    vertex_to_faces = [[] for _ in range(num_vertices)]
-    
-    for face_idx, face in enumerate(faces):
-        for vertex_idx in face:
-            vertex_to_faces[vertex_idx].append(face_idx)
-    
-    # Find connected components using BFS
-    visited = set()
-    components = []
-    
-    for start_face in range(len(faces)):
-        if start_face in visited:
-            continue
-        
-        # BFS to find all connected faces
-        component = []
-        queue = [start_face]
-        visited.add(start_face)
-        
-        while queue:
-            current_face = queue.pop(0)
-            component.append(current_face)
-            
-            # Get all vertices of current face
-            for vertex_idx in faces[current_face]:
-                # Get all faces that share this vertex
-                for neighbor_face in vertex_to_faces[vertex_idx]:
-                    if neighbor_face not in visited:
-                        visited.add(neighbor_face)
-                        queue.append(neighbor_face)
-        
-        components.append(component)
-    
-    return components
+    if faces is None or len(faces) == 0:
+        return []
+
+    faces = np.asarray(faces)
+    num_faces = faces.shape[0]
+
+    # Build vertex->faces incidence as compact CSR-like arrays
+    counts = np.zeros(num_vertices, dtype=np.int32)
+    for f in range(num_faces):
+        counts[int(faces[f, 0])] += 1
+        counts[int(faces[f, 1])] += 1
+        counts[int(faces[f, 2])] += 1
+
+    offsets = np.empty(num_vertices + 1, dtype=np.int32)
+    offsets[0] = 0
+    for i in range(num_vertices):
+        offsets[i + 1] = offsets[i] + counts[i]
+
+    face_ids = np.empty(offsets[-1], dtype=np.int32)
+    write_ptr = offsets[:-1].copy()
+
+    for f in range(num_faces):
+        v0, v1, v2 = int(faces[f, 0]), int(faces[f, 1]), int(faces[f, 2])
+        p0 = write_ptr[v0]
+        face_ids[p0] = f
+        write_ptr[v0] = p0 + 1
+
+        p1 = write_ptr[v1]
+        face_ids[p1] = f
+        write_ptr[v1] = p1 + 1
+
+        p2 = write_ptr[v2]
+        face_ids[p2] = f
+        write_ptr[v2] = p2 + 1
+
+    # Union-Find for faces
+    parent = np.arange(num_faces, dtype=np.int32)
+    rank = np.zeros(num_faces, dtype=np.int8)
+
+    _dsu_union_face_by_vertex_incidence(parent, rank, offsets, face_ids)
+
+    # Group faces by root (keep in Python to return List[List[int]])
+    root_to_faces: Dict[int, List[int]] = {}
+    for f in range(num_faces):
+        r = int(_dsu_find(parent, f))
+        root_to_faces.setdefault(r, []).append(f)
+
+    return list(root_to_faces.values())
+
+
+@staticmethod
+
+def _component_bounds_from_faces(positions: np.ndarray, faces: np.ndarray, face_indices: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute bounds of a component given its face indices using vectorized numpy."""
+    # faces[face_indices] -> (k, 3); ravel -> vertex indices
+    vidx = faces[face_indices].ravel()
+    # unique is important to avoid huge duplication
+    vidx = np.unique(vidx)
+    pts = positions[vidx]
+    return np.min(pts, axis=0), np.max(pts, axis=0)
 
 
 def calculate_component_bounds(positions: np.ndarray, faces: np.ndarray, face_indices: List[int]) -> Tuple[np.ndarray, np.ndarray]:
     """
     Calculate bounds for a connected component.
-    
-    Args:
-        positions: Vertex positions array (Nx3)
-        faces: Face indices array (Mx3)
-        face_indices: List of face indices in this component
-        
-    Returns:
-        Tuple of (bounds_min, bounds_max)
-    """
-    # Get all vertices used by these faces
-    vertex_indices = set()
-    for face_idx in face_indices:
-        for vertex_idx in faces[face_idx]:
-            vertex_indices.add(vertex_idx)
-    
-    # Get positions of these vertices
-    component_positions = positions[list(vertex_indices)]
-    
-    # Calculate bounds
-    bounds_min = np.min(component_positions, axis=0)
-    bounds_max = np.max(component_positions, axis=0)
-    
-    return bounds_min, bounds_max
 
-
-def bounds_intersect(bounds1: Tuple[np.ndarray, np.ndarray], bounds2: Tuple[np.ndarray, np.ndarray]) -> bool:
+    Optimized: use vectorized operations instead of Python sets.
     """
-    Check if two bounding boxes intersect.
-    
-    Args:
-        bounds1: First bounds (min, max)
-        bounds2: Second bounds (min, max)
-        
-    Returns:
-        True if bounds intersect
-    """
-    min1, max1 = bounds1
-    min2, max2 = bounds2
-    
-    # Check if bounds overlap in all three dimensions
-    return (min1[0] <= max2[0] and max1[0] >= min2[0] and
-            min1[1] <= max2[1] and max1[1] >= min2[1] and
-            min1[2] <= max2[2] and max1[2] >= min2[2])
+    face_idx_arr = np.asarray(face_indices, dtype=np.int32)
+    return _component_bounds_from_faces(positions, faces, face_idx_arr)
 
 
 def group_components_by_bounds(components: List[List[int]], positions: np.ndarray, faces: np.ndarray) -> List[List[List[int]]]:
-    """
-    Group connected components based on bounds intersection.
-    
-    Args:
-        components: List of connected components (each is a list of face indices)
-        positions: Vertex positions array
-        faces: Face indices array
-        
-    Returns:
-        List of component groups, each group contains components with intersecting bounds
-    """
-    # Calculate bounds for each component
-    component_bounds = []
-    for component in components:
-        bounds = calculate_component_bounds(positions, faces, component)
-        component_bounds.append(bounds)
-    
-    # Group components with intersecting bounds
-    groups = []
-    assigned = [False] * len(components)
-    
-    for i in range(len(components)):
-        if assigned[i]:
-            continue
-        
-        # Start a new group
-        group = [components[i]]
-        assigned[i] = True
-        
-        # Find all components that intersect with any component in this group
-        changed = True
-        while changed:
-            changed = False
-            for j in range(len(components)):
-                if assigned[j]:
-                    continue
-                
-                # Check if component j intersects with any component in the group
-                for group_component_idx in range(len(group)):
-                    # Find original index of this group component
-                    original_idx = components.index(group[group_component_idx])
-                    if bounds_intersect(component_bounds[j], component_bounds[original_idx]):
-                        group.append(components[j])
-                        assigned[j] = True
-                        changed = True
-                        break
-        
-        groups.append(group)
-    
-    return groups
+    """Group connected components based on bounds intersection."""
+    c = len(components)
+    if c == 0:
+        return []
+
+    # Precompute bounds arrays
+    bmin = np.empty((c, 3), dtype=np.float32)
+    bmax = np.empty((c, 3), dtype=np.float32)
+
+    for i, comp in enumerate(components):
+        mn, mx = calculate_component_bounds(positions, faces, comp)
+        bmin[i] = mn
+        bmax[i] = mx
+
+    # DSU over components
+    parent = np.arange(c, dtype=np.int32)
+    rank = np.zeros(c, dtype=np.int8)
+
+    _aabb_dsu_group(parent, rank, bmin, bmax)
+
+    # Collect groups
+    root_to_group: Dict[int, List[List[int]]] = {}
+    for idx, comp in enumerate(components):
+        r = int(_dsu_find(parent, idx))
+        root_to_group.setdefault(r, []).append(comp)
+
+    return list(root_to_group.values())
 
 
 def create_mesh_from_faces(original_mesh: Mesh, face_indices: List[int], name: str) -> Mesh:
@@ -266,6 +285,7 @@ def analysis_model(model: Model) -> Optional[List[Model]]:
         
         # Step 1: Find connected components
         components = find_connected_components(faces, len(positions))
+        # print(f"{len(components)} components")
         
         if len(components) <= 1:
             # Single component, no need to analyze further
@@ -398,27 +418,14 @@ class DatasetGenerator:
             # Step 4.5: Find extra splits
             extra_splits = []
             for i, part_model in enumerate(part_models):
-                part_model_name = getattr(part_model, "name", f"part_{i}")
-                tri_count = 0
-                vert_count = 0
-                try:
-                    for _mesh in getattr(part_model, "meshes", []) or []:
-                        _faces = getattr(_mesh, "faces", None)
-                        if _faces is not None:
-                            tri_count += len(_faces)
-                        _pos = _mesh.get_vertex_attribute(Mesh.POSITION)
-                        if _pos is not None:
-                            vert_count += len(_pos)
-                except Exception:
-                    pass
+                part_model_name = part_model.name
+                mesh = part_model.meshes[0]
 
                 start_time = time.perf_counter()
                 split_models = analysis_model(part_model)
                 elapsed_sec = time.perf_counter() - start_time
 
-                print(
-                    f"analysis_model elapsed={elapsed_sec:.3f}s | part_model={part_model_name} | triangles={tri_count} | vertices={vert_count}"
-                )
+                # print(f"analysis_model elapsed={elapsed_sec:.3f}s | part_model={part_model_name} | triangles={mesh.get_face_count()} | vertices={mesh.get_vertex_count()}")
 
                 if split_models is not None:
                     extra_splits.extend(split_models)
