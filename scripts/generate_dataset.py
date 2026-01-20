@@ -30,7 +30,6 @@ from mesh_dump.model import Model
 from mesh_dump.mesh import Mesh
 from mesh_dump.parallel_tasks import ParallelTasks, Task
 
-
 @njit(cache=True)
 def _dsu_find(parent: np.ndarray, x: int) -> int:
     while parent[x] != x:
@@ -455,6 +454,8 @@ class DatasetGenerator:
             for i, part_model in enumerate(part_models):
                 part_model_name = part_model.name
                 mesh = part_model.meshes[0]
+                if part_model.get_total_face_count() <= 1000:
+                    continue
 
                 start_time = time.perf_counter()
                 split_models = analysis_model(part_model)
@@ -654,11 +655,11 @@ Examples:
     
     # Define input paths
     input_paths = [
-        ('/Users/shuaizhao/Documents/aaa/snowdrop/ue/Fbx', False)
-        # ('d:/Data/ShadowUnit', False), 
-        # ('d:/Data/DiabloChar/Processed', True), 
-        # ('d:/Data/models_gta5.peds_only/models/peds', True), 
-        # ('d:/Data/models_rdr2.peds_only/models/peds', True), 
+        # ('/Users/shuaizhao/Documents/aaa/snowdrop/ue/Fbx', False)
+        ('d:/Data/ShadowUnit', False), 
+        ('d:/Data/DiabloChar/Processed', True), 
+        ('d:/Data/models_gta5.peds_only/models/peds', True), 
+        ('d:/Data/models_rdr2.peds_only/models/peds', True), 
     ]
     
     if args.parallel:
@@ -676,7 +677,7 @@ Examples:
             tasks = generate_dataset_task(input_paths)
             # Add output_dir and padding to each task's data
             for task in tasks:
-                task.data['output_dir'] = args.output
+                task.data['output_dir'] = f'{args.output}/raw'
                 task.data['padding'] = args.padding
             return tasks
         
@@ -706,7 +707,7 @@ Examples:
             print(f"Processing task {i}/{len(tasks)}: {task.task_id}")
             # Prepare task data
             task_data = task.data.copy()
-            task_data['output_dir'] = args.output
+            task_data['output_dir'] = f'{args.output}/raw'
             task_data['padding'] = args.padding
             
             # Execute task

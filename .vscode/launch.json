@@ -11,7 +11,7 @@
 			"module": "scripts.generate_dataset",
 			"cwd": "${workspaceFolder}",
 			"console": "integratedTerminal",
-			"args": ["-o", "data/raw",
+			"args": ["-o", "e:/data",
                "--padding", "0.01",
                "--parallel"
               ]
