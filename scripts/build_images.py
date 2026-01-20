@@ -47,33 +47,6 @@ class ImageBuilder:
             raise RuntimeError("Blender is required for rendering. Please run this script with Blender.")
         
         self.renderer = BlenderRenderer(resolution=resolution, samples=samples)
-        
-    def _create_downscaled_image(self, source_path: Path, target_path: Path, 
-                                target_size: int = 1024) -> bool:
-        """
-        Create a downscaled version of an image.
-        
-        Args:
-            source_path: Path to source image
-            target_path: Path to save downscaled image
-            target_size: Target size (default: 1024)
-            
-        Returns:
-            True if successful
-        """
-        try:
-            from PIL import Image
-            
-            if not source_path.exists():
-                return False
-            
-            img = Image.open(source_path)
-            img_resized = img.resize((target_size, target_size), Image.Resampling.LANCZOS)
-            img_resized.save(target_path)
-            return True
-        except Exception as e:
-            print(f"    ERROR: Failed to create downscaled image: {e}")
-            return False
     
     def find_samples(self) -> List[Path]:
         """
@@ -109,11 +82,9 @@ class ImageBuilder:
         print(f"\nProcessing sample: {sample_name}")
         print("="*60)
         
-        # Create output directories for this sample (2048 and 1024)
-        sample_images_dir_2048 = self.images_dir / "2048" / sample_name
-        sample_images_dir_1024 = self.images_dir / "1024" / sample_name
-        sample_images_dir_2048.mkdir(parents=True, exist_ok=True)
-        sample_images_dir_1024.mkdir(parents=True, exist_ok=True)
+        # Create output directory for this sample
+        sample_images_dir = self.images_dir / sample_name
+        sample_images_dir.mkdir(parents=True, exist_ok=True)
         
         # Find whole model FBX
         whole_fbx_list = list(sample_dir.glob("*-whole.fbx"))
@@ -123,25 +94,14 @@ class ImageBuilder:
         
         whole_fbx = whole_fbx_list[0]
         
-        # Render whole model
-        whole_image_path_2048 = sample_images_dir_2048 / f"{sample_name}-whole.png"
-        whole_image_path_1024 = sample_images_dir_1024 / f"{sample_name}-whole.png"
+        # Render whole model (4 views)
         print(f"\n[1/3] Rendering WHOLE model")
         print(f"  Input:  {whole_fbx.name}")
-        print(f"  Output: 2048/{sample_name}/{whole_image_path_2048.name}")
-        print(f"          1024/{sample_name}/{whole_image_path_1024.name}")
+        print(f"  Output: {sample_name}/{whole_fbx.stem}_{{front,back,left,right}}.png")
         
-        if not self.renderer.render_model(
-            str(whole_fbx),
-            str(whole_image_path_2048),
-            num_views=4,
-            layout='grid'
-        ):
+        if not self.renderer.render_model(str(whole_fbx), str(sample_images_dir)):
             print(f"  ERROR: Failed to render whole model")
             return False
-        
-        # Create 1024 version by downscaling
-        self._create_downscaled_image(whole_image_path_2048, whole_image_path_1024)
         
         # Find and render parts
         part_fbx_files = [f for f in sample_dir.glob("*.fbx") 
@@ -153,23 +113,11 @@ class ImageBuilder:
         for idx, part_fbx in enumerate(part_fbx_files, 1):
             part_name = part_fbx.stem.replace(f"{sample_name}-", "")
             
-            # Render part
-            part_image_path_2048 = sample_images_dir_2048 / f"{sample_name}-{part_name}.png"
-            part_image_path_1024 = sample_images_dir_1024 / f"{sample_name}-{part_name}.png"
             print(f"\n  Part [{idx}/{len(part_fbx_files)}]: {part_name}")
             print(f"    Input:  {part_fbx.name}")
-            print(f"    Output: 2048/{sample_name}/{part_image_path_2048.name}")
-            print(f"            1024/{sample_name}/{part_image_path_1024.name}")
+            print(f"    Output: {sample_name}/{part_fbx.stem}_{{front,back,left,right}}.png")
             
-            if self.renderer.render_model(
-                str(part_fbx),
-                str(part_image_path_2048),
-                num_views=4,
-                layout='grid'
-            ):
-                # Create 1024 version by downscaling
-                self._create_downscaled_image(part_image_path_2048, part_image_path_1024)
-                
+            if self.renderer.render_model(str(part_fbx), str(sample_images_dir)):
                 # Load part data for validation
                 part_json = sample_dir / f"{sample_name}-{part_name}.json"
                 if part_json.exists():
@@ -184,9 +132,9 @@ class ImageBuilder:
             else:
                 print(f"    ERROR: Failed to render part {part_name}")
         
-        # Validation: render assembled parts and compare
+        # Validation: render assembled parts
         if self.enable_validation and len(part_data_map) > 0:
-            print(f"\n[3/3] VALIDATION: Assembling and comparing")
+            print(f"\n[3/3] VALIDATION: Assembling parts")
             
             # Prepare part FBX paths and transform parameters
             part_fbx_list = []
@@ -201,46 +149,15 @@ class ImageBuilder:
                 })
             
             # Render assembled parts
-            validation_image_path_2048 = sample_images_dir_2048 / f"{sample_name}-validation.png"
-            validation_image_path_1024 = sample_images_dir_1024 / f"{sample_name}-validation.png"
-            if self.renderer.render_assembled_parts(
+            validation_name = f"{sample_name}-validation"
+            print(f"  Output: {sample_name}/{validation_name}_{{front,back,left,right}}.png")
+            
+            if not self.renderer.render_assembled_parts(
                 part_fbx_list,
                 transform_params_list,
-                str(validation_image_path_2048),
-                num_views=4,
-                layout='grid'
+                str(sample_images_dir),
+                validation_name
             ):
-                # Create 1024 version by downscaling
-                self._create_downscaled_image(validation_image_path_2048, validation_image_path_1024)
-                
-                # Compare with whole model image (use 2048 version for comparison)
-                if whole_image_path_2048.exists() and validation_image_path_2048.exists():
-                    metrics = compare_images(
-                        str(whole_image_path_2048),
-                        str(validation_image_path_2048)
-                    )
-                    
-                    if metrics:
-                        ssim_value = metrics.get('ssim', 0.0)
-                        print(f"  Validation SSIM: {ssim_value:.4f}")
-                        
-                        # Save validation metrics
-                        validation_json_path = sample_images_dir_2048 / f"{sample_name}-validation.json"
-                        validation_result = {
-                            'validation_passed': ssim_value >= 0.95,
-                            'ssim': ssim_value,
-                            'mse': metrics.get('mse', 0.0),
-                            'psnr': metrics.get('psnr', 0.0)
-                        }
-                        
-                        with open(validation_json_path, 'w', encoding='utf-8') as f:
-                            json.dump(validation_result, f, indent=2)
-                        
-                        if ssim_value < 0.95:
-                            print(f"  WARNING: Validation failed (SSIM={ssim_value:.4f} < 0.95)")
-                        else:
-                            print(f"  SUCCESS: Validation passed!")
-            else:
                 print(f"  ERROR: Failed to render assembled parts for validation")
         else:
             print(f"\n[3/3] VALIDATION: Skipped (validation disabled or no parts)")

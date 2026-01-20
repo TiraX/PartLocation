@@ -285,16 +285,13 @@ class BlenderRenderer:
         
         return True
         
-    def render_model(self, fbx_path: str, output_path: str, 
-                    num_views: int = 4, layout: str = 'grid') -> bool:
+    def render_model(self, fbx_path: str, output_dir: str) -> bool:
         """
-        Render a model with multiple views and stitch into single image.
+        Render a model with 4 views (front, back, left, right).
         
         Args:
             fbx_path: Path to FBX model file
-            output_path: Output path for stitched image
-            num_views: Number of views (1, 3, or 4)
-            layout: Layout mode ('horizontal' or 'grid')
+            output_dir: Output directory for view images
             
         Returns:
             True if rendering successful
@@ -309,58 +306,29 @@ class BlenderRenderer:
         
         print(f"    [Render] Loaded {len(objects)} objects")
         
-        # Determine which views to render
-        if num_views == 1:
-            views = [self.VIEW_FRONT]
-        elif num_views == 3:
-            views = [self.VIEW_FRONT, self.VIEW_LEFT, self.VIEW_RIGHT]
-        elif num_views == 4:
-            views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
-        else:
-            print(f"    [Render] ERROR: Unsupported number of views: {num_views}")
-            return False
-        
-        # Create temporary directory for individual views (unique per model)
+        # Render 4 views
+        views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
         base_name = Path(fbx_path).stem
-        temp_dir = os.path.join(os.path.dirname(output_path), 'temp_views', base_name)
-        os.makedirs(temp_dir, exist_ok=True)
         
-        print(f"    [Render] Rendering {num_views} views to temp dir: {temp_dir}")
+        print(f"    [Render] Rendering 4 views to: {output_dir}")
         
-        # Render views
-        view_paths = self.render_multi_view(temp_dir, base_name, views)
+        # Render views directly to output directory
+        view_paths = self.render_multi_view(output_dir, base_name, views)
         
         if len(view_paths) != len(views):
             print(f"    [Render] ERROR: Failed to render all views (got {len(view_paths)}/{len(views)})")
             return False
         
-        print(f"    [Render] Successfully rendered {len(view_paths)} views")
-        print(f"    [Render] Stitching views into: {Path(output_path).name}")
+        print(f"    [Render] SUCCESS: Rendered {len(view_paths)} views")
         
-        # Stitch views
-        success = self.stitch_views(view_paths, output_path, layout)
-        
-        if success:
-            print(f"    [Render] SUCCESS: Saved to {Path(output_path).name}")
-        else:
-            print(f"    [Render] ERROR: Failed to stitch views")
-        
-        # Clean up temp directory for this model
-        if os.path.exists(temp_dir):
-            try:
-                os.rmdir(temp_dir)
-            except:
-                pass
-        
-        return success
+        return True
         
     def render_assembled_parts(self, part_fbx_paths: List[str], 
                               transform_params: List[Dict],
-                              output_path: str,
-                              num_views: int = 4,
-                              layout: str = 'grid') -> bool:
+                              output_dir: str,
+                              model_name: str) -> bool:
         """
-        Render assembled parts for validation.
+        Render assembled parts for validation with 4 views.
         
         This loads multiple part models, applies transformation parameters,
         and renders the assembled result.
@@ -369,9 +337,8 @@ class BlenderRenderer:
             part_fbx_paths: List of paths to part FBX files
             transform_params: List of transformation parameters for each part
                 Each dict should contain: 'translation', 'rotation', 'scale'
-            output_path: Output path for rendered image
-            num_views: Number of views (1, 3, or 4)
-            layout: Layout mode ('horizontal' or 'grid')
+            output_dir: Output directory for view images
+            model_name: Base name for output files
             
         Returns:
             True if rendering successful
@@ -414,50 +381,21 @@ class BlenderRenderer:
                 # Apply transformation
                 obj.matrix_world = mat_trans @ mat_rot @ mat_scale
         
-        # Render assembled model
-        # Determine which views to render
-        if num_views == 1:
-            views = [self.VIEW_FRONT]
-        elif num_views == 3:
-            views = [self.VIEW_FRONT, self.VIEW_LEFT, self.VIEW_RIGHT]
-        elif num_views == 4:
-            views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
-        else:
-            print(f"    [Render] ERROR: Unsupported number of views: {num_views}")
-            return False
+        # Render assembled model with 4 views
+        views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
         
-        # Create temporary directory for individual views (unique for validation)
-        base_name = Path(output_path).stem
-        temp_dir = os.path.join(os.path.dirname(output_path), 'temp_views', base_name)
-        os.makedirs(temp_dir, exist_ok=True)
+        print(f"    [Render] Rendering 4 validation views")
         
-        print(f"    [Render] Rendering {num_views} validation views")
-        
-        # Render views
-        view_paths = self.render_multi_view(temp_dir, base_name, views)
+        # Render views directly to output directory
+        view_paths = self.render_multi_view(output_dir, model_name, views)
         
         if len(view_paths) != len(views):
             print(f"    [Render] ERROR: Failed to render all views (got {len(view_paths)}/{len(views)})")
             return False
         
-        print(f"    [Render] Successfully rendered {len(view_paths)} validation views")
+        print(f"    [Render] SUCCESS: Rendered {len(view_paths)} validation views")
         
-        # Stitch views
-        success = self.stitch_views(view_paths, output_path, layout)
-        
-        if success:
-            print(f"    [Render] SUCCESS: Saved validation to {Path(output_path).name}")
-        else:
-            print(f"    [Render] ERROR: Failed to stitch validation views")
-        
-        # Clean up temp directory for validation
-        if os.path.exists(temp_dir):
-            try:
-                os.rmdir(temp_dir)
-            except:
-                pass
-        
-        return success
+        return True
 
 
 def compare_images(image1_path: str, image2_path: str) -> Dict[str, float]:
