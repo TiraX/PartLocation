@@ -1,20 +1,34 @@
 {
-    // Use IntelliSense to learn about possible attributes.
-    // Hover to view descriptions of existing attributes.
-    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
-    "version": "0.2.0",
-    "configurations": [
-		{
-			"name": "Build Dataset",
-			"type": "debugpy",
-			"request": "launch",
-			"module": "scripts.generate_dataset",
-			"cwd": "${workspaceFolder}",
-			"console": "integratedTerminal",
-			"args": ["-o", "e:/data",
-               "--padding", "0.01",
-               "--parallel"
-              ]
-		}
-    ]
+		// Use IntelliSense to learn about possible attributes.
+		// Hover to view descriptions of existing attributes.
+		// For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+		"version": "0.2.0",
+		"configurations": [
+
+			{
+				"name": "Build Dataset",
+				"type": "debugpy",
+				"request": "launch",
+				"module": "scripts.generate_dataset",
+				"cwd": "${workspaceFolder}",
+				"console": "integratedTerminal",
+				"args": ["-o", "e:/data",
+								 "--padding", "0.01",
+								 "--parallel"
+								]
+			},
+			{
+				"name": "Build Images",
+				"type": "debugpy",
+				"request": "launch",
+				"module": "scripts.build_images",
+				"cwd": "${workspaceFolder}",
+				"console": "integratedTerminal",
+				"args": ["--data", "e:/data/raw",
+								 "--images", "e:/data/images",
+								 "--resolution", "1024",
+								 "--validate"
+								]
+			}
+			]
 }

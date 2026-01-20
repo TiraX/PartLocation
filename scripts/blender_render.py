@@ -1,337 +1,576 @@
 """
-Blender rendering script for generating multi-view images.
+Blender rendering module for generating multi-view images.
 
-This script should be run within Blender using:
-    blender --background --python blender_render.py -- [arguments]
-
-Or from Blender's scripting interface.
+This module provides functionality to:
+1. Load FBX models into Blender
+2. Render from standard camera positions (front, back, left, right)
+3. Stitch multiple views into a single image
+4. Validate part assembly by rendering assembled parts
 """
 
 import bpy
-import math
-import sys
 import os
+import sys
+import json
+import math
+import numpy as np
 from pathlib import Path
-from mathutils import Vector, Quaternion, Euler
+from typing import List, Tuple, Optional, Dict
+from mathutils import Vector, Quaternion, Matrix
 
 
-class MultiViewRenderer:
-    """Multi-view renderer for 3D models."""
+class BlenderRenderer:
+    """Blender renderer for multi-view image generation."""
     
-    def __init__(self, output_dir: str, resolution: int = 512):
-        """Initialize the renderer.
-        
-        Args:
-            output_dir: Directory to save rendered images
-            resolution: Image resolution (width and height)
+    # Standard camera positions (distance from origin)
+    CAMERA_DISTANCE = 2.0
+    
+    # Camera view directions
+    VIEW_FRONT = 0
+    VIEW_BACK = 1
+    VIEW_LEFT = 2
+    VIEW_RIGHT = 3
+    
+    VIEW_NAMES = ['front', 'back', 'left', 'right']
+    
+    def __init__(self, resolution: int = 512, samples: int = 64):
         """
-        self.output_dir = Path(output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.resolution = resolution
-        
-        # Setup render settings
-        self.setup_render_settings()
-        
-    def setup_render_settings(self):
-        """Configure Blender render settings."""
-        scene = bpy.context.scene
-        scene.render.engine = 'CYCLES'  # Use Cycles for better quality
-        scene.render.resolution_x = self.resolution
-        scene.render.resolution_y = self.resolution
-        scene.render.resolution_percentage = 100
-        scene.render.image_settings.file_format = 'PNG'
-        scene.render.image_settings.color_mode = 'RGBA'
-        
-        # Cycles settings
-        scene.cycles.samples = 128
-        scene.cycles.use_denoising = True
-        
-        # Transparent background
-        scene.render.film_transparent = True
-        
-    def setup_camera(self, distance: float = 3.0, focal_length: float = 50.0):
-        """Setup or get camera.
+        Initialize Blender renderer.
         
         Args:
-            distance: Distance from origin
-            focal_length: Camera focal length in mm
+            resolution: Image resolution (width and height)
+            samples: Number of render samples for quality
+        """
+        self.resolution = resolution
+        self.samples = samples
+        
+        # Setup Blender scene
+        self._setup_scene()
+        
+    def _setup_scene(self):
+        """Setup Blender scene with proper render settings."""
+        # Clear existing scene
+        bpy.ops.object.select_all(action='SELECT')
+        bpy.ops.object.delete()
+        
+        # Set render engine to Cycles for better quality
+        bpy.context.scene.render.engine = 'CYCLES'
+        bpy.context.scene.cycles.samples = self.samples
+        bpy.context.scene.cycles.use_denoising = True
+        
+        # Set resolution
+        bpy.context.scene.render.resolution_x = self.resolution
+        bpy.context.scene.render.resolution_y = self.resolution
+        bpy.context.scene.render.resolution_percentage = 100
+        
+        # Set transparent background
+        bpy.context.scene.render.film_transparent = True
+        bpy.context.scene.render.image_settings.color_mode = 'RGBA'
+        bpy.context.scene.render.image_settings.file_format = 'PNG'
+        
+        # Setup lighting
+        self._setup_lighting()
+        
+    def _setup_lighting(self):
+        """Setup three-point lighting for good model visibility."""
+        # Key light (main light)
+        key_light = bpy.data.lights.new(name="KeyLight", type='SUN')
+        key_light.energy = 2.0
+        key_light_obj = bpy.data.objects.new(name="KeyLight", object_data=key_light)
+        bpy.context.collection.objects.link(key_light_obj)
+        key_light_obj.location = (5, -5, 5)
+        key_light_obj.rotation_euler = (math.radians(45), 0, math.radians(45))
+        
+        # Fill light (softer, from opposite side)
+        fill_light = bpy.data.lights.new(name="FillLight", type='SUN')
+        fill_light.energy = 1.0
+        fill_light_obj = bpy.data.objects.new(name="FillLight", object_data=fill_light)
+        bpy.context.collection.objects.link(fill_light_obj)
+        fill_light_obj.location = (-5, 5, 3)
+        fill_light_obj.rotation_euler = (math.radians(60), 0, math.radians(-135))
+        
+        # Back light (rim light)
+        back_light = bpy.data.lights.new(name="BackLight", type='SUN')
+        back_light.energy = 0.5
+        back_light_obj = bpy.data.objects.new(name="BackLight", object_data=back_light)
+        bpy.context.collection.objects.link(back_light_obj)
+        back_light_obj.location = (0, 5, 5)
+        back_light_obj.rotation_euler = (math.radians(45), 0, math.radians(180))
+        
+    def load_fbx(self, fbx_path: str, clear_scene: bool = True) -> List[bpy.types.Object]:
+        """
+        Load FBX file into Blender.
+        
+        Args:
+            fbx_path: Path to FBX file
+            clear_scene: Whether to clear existing objects before loading
+            
+        Returns:
+            List of imported objects
+        """
+        if clear_scene:
+            # Clear existing mesh objects (keep lights and camera)
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in bpy.context.scene.objects:
+                if obj.type == 'MESH':
+                    obj.select_set(True)
+            bpy.ops.object.delete()
+        
+        # Import FBX
+        bpy.ops.import_scene.fbx(filepath=fbx_path)
+        
+        # Get imported objects
+        imported_objects = [obj for obj in bpy.context.selected_objects if obj.type == 'MESH']
+        
+        return imported_objects
+        
+    def _create_camera_at_view(self, view_index: int) -> bpy.types.Object:
+        """
+        Create camera at specified view position.
+        
+        Args:
+            view_index: View index (0=front, 1=back, 2=left, 3=right)
             
         Returns:
             Camera object
         """
-        # Remove existing cameras
-        bpy.ops.object.select_all(action='DESELECT')
-        bpy.ops.object.select_by_type(type='CAMERA')
-        bpy.ops.object.delete()
+        # Create camera
+        camera_data = bpy.data.cameras.new(name=f"Camera_{self.VIEW_NAMES[view_index]}")
+        camera_data.type = 'ORTHO'
+        camera_data.ortho_scale = 1.2  # Slightly larger than normalized model
         
-        # Create new camera
-        bpy.ops.object.camera_add()
-        camera = bpy.context.active_object
-        camera.data.lens = focal_length
+        camera_obj = bpy.data.objects.new(f"Camera_{self.VIEW_NAMES[view_index]}", camera_data)
+        bpy.context.collection.objects.link(camera_obj)
+        
+        # Set camera position and rotation based on view
+        if view_index == self.VIEW_FRONT:
+            # Front view: looking from +Y towards -Y (along -Y axis)
+            camera_obj.location = (0, self.CAMERA_DISTANCE, 0)
+            camera_obj.rotation_euler = (math.radians(90), 0, math.radians(180))
+        elif view_index == self.VIEW_BACK:
+            # Back view: looking from -Y towards +Y (along +Y axis)
+            camera_obj.location = (0, -self.CAMERA_DISTANCE, 0)
+            camera_obj.rotation_euler = (math.radians(90), 0, 0)
+        elif view_index == self.VIEW_LEFT:
+            # Left view: looking from -X towards +X (along +X axis)
+            camera_obj.location = (-self.CAMERA_DISTANCE, 0, 0)
+            camera_obj.rotation_euler = (math.radians(90), 0, math.radians(-90))
+        elif view_index == self.VIEW_RIGHT:
+            # Right view: looking from +X towards -X (along -X axis)
+            camera_obj.location = (self.CAMERA_DISTANCE, 0, 0)
+            camera_obj.rotation_euler = (math.radians(90), 0, math.radians(90))
+        
+        return camera_obj
+        
+    def render_view(self, view_index: int, output_path: str) -> bool:
+        """
+        Render a single view.
+        
+        Args:
+            view_index: View index (0=front, 1=back, 2=left, 3=right)
+            output_path: Output image path
+            
+        Returns:
+            True if rendering successful
+        """
+        # Create camera for this view
+        camera = self._create_camera_at_view(view_index)
         
         # Set as active camera
         bpy.context.scene.camera = camera
         
-        return camera
-        
-    def setup_lighting(self, energy: float = 1000.0):
-        """Setup scene lighting.
-        
-        Args:
-            energy: Light energy/strength
-        """
-        # Remove existing lights
-        bpy.ops.object.select_all(action='DESELECT')
-        bpy.ops.object.select_by_type(type='LIGHT')
-        bpy.ops.object.delete()
-        
-        # Add key light (front-top)
-        bpy.ops.object.light_add(type='AREA', location=(2, -2, 3))
-        key_light = bpy.context.active_object
-        key_light.data.energy = energy
-        key_light.data.size = 5
-        
-        # Add fill light (back)
-        bpy.ops.object.light_add(type='AREA', location=(-2, 2, 2))
-        fill_light = bpy.context.active_object
-        fill_light.data.energy = energy * 0.5
-        fill_light.data.size = 5
-        
-        # Add rim light (side)
-        bpy.ops.object.light_add(type='AREA', location=(3, 0, 1))
-        rim_light = bpy.context.active_object
-        rim_light.data.energy = energy * 0.3
-        rim_light.data.size = 3
-        
-    def set_camera_position(self, camera, view_type: str, distance: float = 3.0, 
-                           elevation: float = 0.0, azimuth_offset: float = 0.0):
-        """Set camera position for a specific view.
-        
-        Args:
-            camera: Camera object
-            view_type: One of 'front', 'back', 'left', 'right'
-            distance: Distance from origin
-            elevation: Elevation angle in degrees (for data augmentation)
-            azimuth_offset: Azimuth offset in degrees (for data augmentation)
-        """
-        # Base azimuth angles for each view
-        view_angles = {
-            'front': 0,
-            'right': 90,
-            'back': 180,
-            'left': 270
-        }
-        
-        if view_type not in view_angles:
-            raise ValueError(f"Invalid view_type: {view_type}")
-        
-        # Calculate camera position
-        azimuth = math.radians(view_angles[view_type] + azimuth_offset)
-        elevation_rad = math.radians(elevation)
-        
-        x = distance * math.cos(elevation_rad) * math.sin(azimuth)
-        y = -distance * math.cos(elevation_rad) * math.cos(azimuth)
-        z = distance * math.sin(elevation_rad)
-        
-        camera.location = (x, y, z)
-        
-        # Point camera at origin
-        direction = Vector((0, 0, 0)) - camera.location
-        rot_quat = direction.to_track_quat('-Z', 'Y')
-        camera.rotation_euler = rot_quat.to_euler()
-        
-    def render_view(self, camera, view_type: str, output_path: str, 
-                   elevation: float = 0.0, azimuth_offset: float = 0.0):
-        """Render a single view.
-        
-        Args:
-            camera: Camera object
-            view_type: View type identifier
-            output_path: Path to save the rendered image
-            elevation: Elevation angle offset for augmentation
-            azimuth_offset: Azimuth angle offset for augmentation
-        """
-        self.set_camera_position(camera, view_type, elevation=elevation, 
-                                azimuth_offset=azimuth_offset)
-        
         # Render
-        bpy.context.scene.render.filepath = str(output_path)
+        bpy.context.scene.render.filepath = output_path
         bpy.ops.render.render(write_still=True)
         
-    def render_multiview(self, views: list, output_prefix: str, 
-                        elevation: float = 0.0, azimuth_offset: float = 0.0):
-        """Render multiple views.
+        # Clean up camera
+        bpy.data.objects.remove(camera, do_unlink=True)
+        
+        return os.path.exists(output_path)
+        
+    def render_multi_view(self, output_dir: str, base_name: str, 
+                         views: List[int] = None) -> List[str]:
+        """
+        Render multiple views.
         
         Args:
-            views: List of view types to render (e.g., ['front', 'back', 'left', 'right'])
-            output_prefix: Prefix for output filenames
-            elevation: Elevation angle offset
-            azimuth_offset: Azimuth angle offset
+            output_dir: Output directory for images
+            base_name: Base name for output files
+            views: List of view indices to render (default: all 4 views)
             
         Returns:
-            List of rendered image paths
+            List of output image paths
         """
-        camera = self.setup_camera()
-        rendered_paths = []
+        if views is None:
+            views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
         
-        for view_type in views:
-            output_path = self.output_dir / f"{output_prefix}_{view_type}.png"
-            self.render_view(camera, view_type, str(output_path), 
-                           elevation, azimuth_offset)
-            rendered_paths.append(output_path)
+        os.makedirs(output_dir, exist_ok=True)
+        
+        output_paths = []
+        for view_idx in views:
+            view_name = self.VIEW_NAMES[view_idx]
+            output_path = os.path.join(output_dir, f"{base_name}_{view_name}.png")
             
-        return rendered_paths
+            if self.render_view(view_idx, output_path):
+                output_paths.append(output_path)
+            else:
+                print(f"Warning: Failed to render view {view_name}")
         
-    def combine_views_horizontal(self, image_paths: list, output_path: str):
-        """Combine multiple views into a single horizontal image.
+        return output_paths
+        
+    def stitch_views(self, image_paths: List[str], output_path: str, 
+                    layout: str = 'grid') -> bool:
+        """
+        Stitch multiple view images into a single image.
         
         Args:
-            image_paths: List of image paths to combine
-            output_path: Path to save combined image
-        """
-        import numpy as np
-        from PIL import Image
-        
-        images = [Image.open(p) for p in image_paths]
-        widths, heights = zip(*(i.size for i in images))
-        
-        total_width = sum(widths)
-        max_height = max(heights)
-        
-        combined = Image.new('RGBA', (total_width, max_height))
-        
-        x_offset = 0
-        for img in images:
-            combined.paste(img, (x_offset, 0))
-            x_offset += img.width
-            
-        combined.save(output_path)
-        
-    def combine_views_grid(self, image_paths: list, output_path: str, grid_size: tuple = (2, 2)):
-        """Combine multiple views into a grid layout.
-        
-        Args:
-            image_paths: List of image paths to combine
-            output_path: Path to save combined image
-            grid_size: Grid dimensions (rows, cols)
-        """
-        import numpy as np
-        from PIL import Image
-        
-        images = [Image.open(p) for p in image_paths]
-        img_width, img_height = images[0].size
-        
-        rows, cols = grid_size
-        combined = Image.new('RGBA', (img_width * cols, img_height * rows))
-        
-        for idx, img in enumerate(images):
-            row = idx // cols
-            col = idx % cols
-            combined.paste(img, (col * img_width, row * img_height))
-            
-        combined.save(output_path)
-        
-    def render_object(self, obj_name: str, views: list, output_name: str,
-                     combine_mode: str = 'grid', elevation: float = 0.0, 
-                     azimuth_offset: float = 0.0):
-        """Render a specific object with multiple views.
-        
-        Args:
-            obj_name: Name of the object to render
-            views: List of view types
-            output_name: Output filename prefix
-            combine_mode: 'horizontal', 'grid', or 'separate'
-            elevation: Elevation angle offset
-            azimuth_offset: Azimuth angle offset
+            image_paths: List of image paths to stitch (order: front, back, left, right)
+            output_path: Output path for stitched image
+            layout: Layout mode ('horizontal' or 'grid', default: 'grid')
             
         Returns:
-            Path to the rendered image(s)
+            True if stitching successful
         """
-        # Hide all objects except the target
-        for obj in bpy.data.objects:
-            if obj.type == 'MESH':
-                obj.hide_render = (obj.name != obj_name)
+        try:
+            from PIL import Image
+        except ImportError:
+            print("Error: PIL/Pillow is required for image stitching")
+            return False
+        
+        if not image_paths:
+            return False
+        
+        # Load images
+        images = [Image.open(path) for path in image_paths]
+        
+        # Get image dimensions
+        width, height = images[0].size
+        
+        # Create stitched image
+        if layout == 'horizontal':
+            # Horizontal layout: [front, back, left, right]
+            stitched_width = width * len(images)
+            stitched_height = height
+            stitched = Image.new('RGBA', (stitched_width, stitched_height))
+            
+            for i, img in enumerate(images):
+                stitched.paste(img, (i * width, 0))
                 
-        # Render views
-        rendered_paths = self.render_multiview(views, output_name, elevation, azimuth_offset)
-        
-        # Combine if requested
-        if combine_mode == 'horizontal':
-            combined_path = self.output_dir / f"{output_name}_combined.png"
-            self.combine_views_horizontal(rendered_paths, str(combined_path))
-            return combined_path
-        elif combine_mode == 'grid':
-            combined_path = self.output_dir / f"{output_name}_combined.png"
-            grid_size = (2, 2) if len(views) == 4 else (1, len(views))
-            self.combine_views_grid(rendered_paths, str(combined_path), grid_size)
-            return combined_path
+        elif layout == 'grid':
+            # Grid layout: 2x2 for 4 views
+            # Layout: [front, back]
+            #         [left,  right]
+            cols = 2
+            rows = 2
+            stitched_width = width * cols
+            stitched_height = height * rows
+            stitched = Image.new('RGBA', (stitched_width, stitched_height))
+            
+            # Paste images in order: front(0,0), back(1,0), left(0,1), right(1,1)
+            for i, img in enumerate(images):
+                row = i // cols
+                col = i % cols
+                stitched.paste(img, (col * width, row * height))
         else:
-            return rendered_paths
-            
-    def render_scene(self, whole_name: str, part_names: list, sample_id: str,
-                    views: list = ['front', 'back', 'left', 'right'],
-                    combine_mode: str = 'grid', elevation: float = 0.0,
-                    azimuth_offset: float = 0.0):
-        """Render complete scene with whole object and parts.
+            print(f"Error: Unknown layout mode: {layout}")
+            return False
+        
+        # Save stitched image
+        stitched.save(output_path)
+        
+        # Clean up temporary images
+        for path in image_paths:
+            if os.path.exists(path):
+                os.remove(path)
+        
+        return True
+        
+    def render_model(self, fbx_path: str, output_path: str, 
+                    num_views: int = 4, layout: str = 'grid') -> bool:
+        """
+        Render a model with multiple views and stitch into single image.
         
         Args:
-            whole_name: Name of the whole object
-            part_names: List of part object names
-            sample_id: Sample identifier
-            views: List of views to render
-            combine_mode: How to combine views
-            elevation: Elevation angle offset
-            azimuth_offset: Azimuth angle offset
+            fbx_path: Path to FBX model file
+            output_path: Output path for stitched image
+            num_views: Number of views (1, 3, or 4)
+            layout: Layout mode ('horizontal' or 'grid')
             
         Returns:
-            Dictionary with paths to rendered images
+            True if rendering successful
         """
-        results = {}
+        print(f"    [Render] Loading FBX: {Path(fbx_path).name}")
         
-        # Render whole object
-        whole_path = self.render_object(
-            whole_name, views, f"{sample_id}_whole", 
-            combine_mode, elevation, azimuth_offset
-        )
-        results['whole'] = whole_path
+        # Load model
+        objects = self.load_fbx(fbx_path)
+        if not objects:
+            print(f"    [Render] ERROR: Failed to load FBX file: {fbx_path}")
+            return False
         
-        # Render each part
-        results['parts'] = {}
-        for part_name in part_names:
-            part_path = self.render_object(
-                part_name, views, f"{sample_id}_part_{part_name}",
-                combine_mode, elevation, azimuth_offset
-            )
-            results['parts'][part_name] = part_path
+        print(f"    [Render] Loaded {len(objects)} objects")
+        
+        # Determine which views to render
+        if num_views == 1:
+            views = [self.VIEW_FRONT]
+        elif num_views == 3:
+            views = [self.VIEW_FRONT, self.VIEW_LEFT, self.VIEW_RIGHT]
+        elif num_views == 4:
+            views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
+        else:
+            print(f"    [Render] ERROR: Unsupported number of views: {num_views}")
+            return False
+        
+        # Create temporary directory for individual views (unique per model)
+        base_name = Path(fbx_path).stem
+        temp_dir = os.path.join(os.path.dirname(output_path), 'temp_views', base_name)
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        print(f"    [Render] Rendering {num_views} views to temp dir: {temp_dir}")
+        
+        # Render views
+        view_paths = self.render_multi_view(temp_dir, base_name, views)
+        
+        if len(view_paths) != len(views):
+            print(f"    [Render] ERROR: Failed to render all views (got {len(view_paths)}/{len(views)})")
+            return False
+        
+        print(f"    [Render] Successfully rendered {len(view_paths)} views")
+        print(f"    [Render] Stitching views into: {Path(output_path).name}")
+        
+        # Stitch views
+        success = self.stitch_views(view_paths, output_path, layout)
+        
+        if success:
+            print(f"    [Render] SUCCESS: Saved to {Path(output_path).name}")
+        else:
+            print(f"    [Render] ERROR: Failed to stitch views")
+        
+        # Clean up temp directory for this model
+        if os.path.exists(temp_dir):
+            try:
+                os.rmdir(temp_dir)
+            except:
+                pass
+        
+        return success
+        
+    def render_assembled_parts(self, part_fbx_paths: List[str], 
+                              transform_params: List[Dict],
+                              output_path: str,
+                              num_views: int = 4,
+                              layout: str = 'grid') -> bool:
+        """
+        Render assembled parts for validation.
+        
+        This loads multiple part models, applies transformation parameters,
+        and renders the assembled result.
+        
+        Args:
+            part_fbx_paths: List of paths to part FBX files
+            transform_params: List of transformation parameters for each part
+                Each dict should contain: 'translation', 'rotation', 'scale'
+            output_path: Output path for rendered image
+            num_views: Number of views (1, 3, or 4)
+            layout: Layout mode ('horizontal' or 'grid')
             
-        # Restore visibility
-        for obj in bpy.data.objects:
+        Returns:
+            True if rendering successful
+        """
+        if len(part_fbx_paths) != len(transform_params):
+            print("    [Render] ERROR: Number of parts and transform parameters must match")
+            return False
+        
+        print(f"    [Render] Assembling {len(part_fbx_paths)} parts for validation")
+        
+        # Clear scene
+        bpy.ops.object.select_all(action='DESELECT')
+        for obj in bpy.context.scene.objects:
             if obj.type == 'MESH':
-                obj.hide_render = False
+                obj.select_set(True)
+        bpy.ops.object.delete()
+        
+        # Load and transform each part
+        for fbx_path, params in zip(part_fbx_paths, transform_params):
+            # Load part
+            objects = self.load_fbx(fbx_path, clear_scene=False)
+            
+            if not objects:
+                print(f"    [Render] WARNING: Failed to load part: {fbx_path}")
+                continue
+            
+            # Apply transformation to all objects of this part
+            translation = Vector(params['translation'])
+            rotation_quat = Quaternion(params['rotation'])  # [w, x, y, z]
+            scale = Vector(params['scale'])
+            
+            for obj in objects:
+                # Create transformation matrix
+                mat_trans = Matrix.Translation(translation)
+                mat_rot = rotation_quat.to_matrix().to_4x4()
+                mat_scale = Matrix.Scale(scale.x, 4, (1, 0, 0)) @ \
+                           Matrix.Scale(scale.y, 4, (0, 1, 0)) @ \
+                           Matrix.Scale(scale.z, 4, (0, 0, 1))
                 
-        return results
+                # Apply transformation
+                obj.matrix_world = mat_trans @ mat_rot @ mat_scale
+        
+        # Render assembled model
+        # Determine which views to render
+        if num_views == 1:
+            views = [self.VIEW_FRONT]
+        elif num_views == 3:
+            views = [self.VIEW_FRONT, self.VIEW_LEFT, self.VIEW_RIGHT]
+        elif num_views == 4:
+            views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
+        else:
+            print(f"    [Render] ERROR: Unsupported number of views: {num_views}")
+            return False
+        
+        # Create temporary directory for individual views (unique for validation)
+        base_name = Path(output_path).stem
+        temp_dir = os.path.join(os.path.dirname(output_path), 'temp_views', base_name)
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        print(f"    [Render] Rendering {num_views} validation views")
+        
+        # Render views
+        view_paths = self.render_multi_view(temp_dir, base_name, views)
+        
+        if len(view_paths) != len(views):
+            print(f"    [Render] ERROR: Failed to render all views (got {len(view_paths)}/{len(views)})")
+            return False
+        
+        print(f"    [Render] Successfully rendered {len(view_paths)} validation views")
+        
+        # Stitch views
+        success = self.stitch_views(view_paths, output_path, layout)
+        
+        if success:
+            print(f"    [Render] SUCCESS: Saved validation to {Path(output_path).name}")
+        else:
+            print(f"    [Render] ERROR: Failed to stitch validation views")
+        
+        # Clean up temp directory for validation
+        if os.path.exists(temp_dir):
+            try:
+                os.rmdir(temp_dir)
+            except:
+                pass
+        
+        return success
+
+
+def compare_images(image1_path: str, image2_path: str) -> Dict[str, float]:
+    """
+    Compare two images and return similarity metrics.
+    
+    Args:
+        image1_path: Path to first image
+        image2_path: Path to second image
+        
+    Returns:
+        Dictionary with metrics: 'ssim', 'mse', 'psnr'
+    """
+    try:
+        from PIL import Image
+        import numpy as np
+        from skimage.metrics import structural_similarity as ssim
+    except ImportError:
+        print("Error: PIL, numpy, and scikit-image are required for image comparison")
+        return {}
+    
+    # Load images
+    img1 = Image.open(image1_path).convert('RGB')
+    img2 = Image.open(image2_path).convert('RGB')
+    
+    # Convert to numpy arrays
+    arr1 = np.array(img1, dtype=np.float32)
+    arr2 = np.array(img2, dtype=np.float32)
+    
+    # Calculate MSE
+    mse = np.mean((arr1 - arr2) ** 2)
+    
+    # Calculate PSNR
+    if mse == 0:
+        psnr = float('inf')
+    else:
+        max_pixel = 255.0
+        psnr = 20 * np.log10(max_pixel / np.sqrt(mse))
+    
+    # Calculate SSIM
+    ssim_value = ssim(arr1, arr2, multichannel=True, channel_axis=2, data_range=255.0)
+    
+    return {
+        'ssim': float(ssim_value),
+        'mse': float(mse),
+        'psnr': float(psnr)
+    }
 
 
 def main():
     """Main function for command-line usage."""
-    # Parse arguments (after --)
-    argv = sys.argv
-    if "--" in argv:
-        argv = argv[argv.index("--") + 1:]
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Render FBX models with Blender",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    
+    parser.add_argument(
+        'input',
+        help='Input FBX file path'
+    )
+    parser.add_argument(
+        '-o', '--output',
+        required=True,
+        help='Output image path'
+    )
+    parser.add_argument(
+        '--views',
+        type=int,
+        default=4,
+        choices=[1, 3, 4],
+        help='Number of views to render (default: 4)'
+    )
+    parser.add_argument(
+        '--layout',
+        default='horizontal',
+        choices=['horizontal', 'grid'],
+        help='Layout mode for stitching (default: horizontal)'
+    )
+    parser.add_argument(
+        '--resolution',
+        type=int,
+        default=512,
+        help='Image resolution (default: 512)'
+    )
+    parser.add_argument(
+        '--samples',
+        type=int,
+        default=64,
+        help='Render samples for quality (default: 64)'
+    )
+    
+    args = parser.parse_args()
+    
+    # Create renderer
+    renderer = BlenderRenderer(resolution=args.resolution, samples=args.samples)
+    
+    # Render model
+    success = renderer.render_model(
+        args.input,
+        args.output,
+        num_views=args.views,
+        layout=args.layout
+    )
+    
+    if success:
+        print(f"Successfully rendered to: {args.output}")
+        return 0
     else:
-        argv = []
-    
-    # Example usage
-    output_dir = argv[0] if len(argv) > 0 else "./output"
-    
-    renderer = MultiViewRenderer(output_dir)
-    renderer.setup_lighting()
-    
-    # Example: render current scene
-    # You would need to specify object names based on your scene
-    print(f"Renderer initialized. Output directory: {output_dir}")
-    print("Use renderer.render_scene() to render objects.")
+        print("Error: Rendering failed")
+        return 1
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    sys.exit(main())
