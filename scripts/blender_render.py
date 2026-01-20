@@ -72,10 +72,34 @@ class BlenderRenderer:
         self._setup_lighting()
         
     def _setup_lighting(self):
+        light_boost = 1.8
+        amb_light_boost = 0.6
         """Setup three-point lighting for good model visibility."""
+        
+        # Setup HDR environment lighting
+        world = bpy.context.scene.world
+        world.use_nodes = True
+        nodes = world.node_tree.nodes
+        links = world.node_tree.links
+        
+        # Clear existing nodes
+        nodes.clear()
+        
+        # Add Background node
+        bg_node = nodes.new(type='ShaderNodeBackground')
+        bg_node.inputs['Strength'].default_value = 1.0 * amb_light_boost
+        # Set a neutral gray color for basic ambient lighting
+        bg_node.inputs['Color'].default_value = (0.8, 0.8, 0.8, 1.0)
+        
+        # Add Output node
+        output_node = nodes.new(type='ShaderNodeOutputWorld')
+        
+        # Link nodes
+        links.new(bg_node.outputs['Background'], output_node.inputs['Surface'])
+        
         # Key light (main light)
         key_light = bpy.data.lights.new(name="KeyLight", type='SUN')
-        key_light.energy = 2.0
+        key_light.energy = 2.0 * light_boost
         key_light_obj = bpy.data.objects.new(name="KeyLight", object_data=key_light)
         bpy.context.collection.objects.link(key_light_obj)
         key_light_obj.location = (5, -5, 5)
@@ -83,7 +107,7 @@ class BlenderRenderer:
         
         # Fill light (softer, from opposite side)
         fill_light = bpy.data.lights.new(name="FillLight", type='SUN')
-        fill_light.energy = 1.0
+        fill_light.energy = 1.0 * light_boost
         fill_light_obj = bpy.data.objects.new(name="FillLight", object_data=fill_light)
         bpy.context.collection.objects.link(fill_light_obj)
         fill_light_obj.location = (-5, 5, 3)
@@ -91,7 +115,7 @@ class BlenderRenderer:
         
         # Back light (rim light)
         back_light = bpy.data.lights.new(name="BackLight", type='SUN')
-        back_light.energy = 0.5
+        back_light.energy = 0.5 * light_boost
         back_light_obj = bpy.data.objects.new(name="BackLight", object_data=back_light)
         bpy.context.collection.objects.link(back_light_obj)
         back_light_obj.location = (0, 5, 5)
