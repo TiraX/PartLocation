@@ -99,9 +99,19 @@ class ImageBuilder:
         print(f"  Input:  {whole_fbx.name}")
         print(f"  Output: {sample_name}/{whole_fbx.stem}_{{front,back,left,right}}.png")
         
-        if not self.renderer.render_model(str(whole_fbx), str(sample_images_dir)):
-            print(f"  ERROR: Failed to render whole model")
-            return False
+        # Check if all 4 views already exist
+        views = ['front', 'back', 'left', 'right']
+        all_views_exist = all(
+            (sample_images_dir / f"{whole_fbx.stem}_{view}.png").exists()
+            for view in views
+        )
+        
+        if all_views_exist:
+            print(f"  SKIPPED: All 4 views already exist")
+        else:
+            if not self.renderer.render_model(str(whole_fbx), str(sample_images_dir)):
+                print(f"  ERROR: Failed to render whole model")
+                return False
         
         # Find and render parts
         part_fbx_files = [f for f in sample_dir.glob("*.fbx") 
@@ -117,7 +127,27 @@ class ImageBuilder:
             print(f"    Input:  {part_fbx.name}")
             print(f"    Output: {sample_name}/{part_fbx.stem}_{{front,back,left,right}}.png")
             
-            if self.renderer.render_model(str(part_fbx), str(sample_images_dir)):
+            # Check if all 4 views already exist
+            views = ['front', 'back', 'left', 'right']
+            all_views_exist = all(
+                (sample_images_dir / f"{part_fbx.stem}_{view}.png").exists()
+                for view in views
+            )
+            
+            if all_views_exist:
+                print(f"    SKIPPED: All 4 views already exist")
+                # Still load part data for validation
+                part_json = sample_dir / f"{sample_name}-{part_name}.json"
+                if part_json.exists():
+                    with open(part_json, 'r', encoding='utf-8') as f:
+                        part_data = json.load(f)
+                        part_data_map[part_name] = {
+                            'fbx_path': str(part_fbx),
+                            'translation': part_data['translation'],
+                            'rotation': part_data['rotation'],
+                            'scale': part_data['scale']
+                        }
+            elif self.renderer.render_model(str(part_fbx), str(sample_images_dir)):
                 # Load part data for validation
                 part_json = sample_dir / f"{sample_name}-{part_name}.json"
                 if part_json.exists():
