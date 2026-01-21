@@ -72,8 +72,8 @@ class BlenderRenderer:
         self._setup_lighting()
         
     def _setup_lighting(self):
-        light_boost = 1.8
-        amb_light_boost = 0.6
+        light_boost = 1.6#1.8
+        amb_light_boost = 0.2#0.6
         """Setup three-point lighting for good model visibility."""
         
         # Setup HDR environment lighting
