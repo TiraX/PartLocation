@@ -33,16 +33,18 @@ class BlenderRenderer:
     
     VIEW_NAMES = ['front', 'back', 'left', 'right']
     
-    def __init__(self, resolution: int = 512, samples: int = 64):
+    def __init__(self, resolution: int = 512, samples: int = 64, use_gpu: bool = True):
         """
         Initialize Blender renderer.
         
         Args:
             resolution: Image resolution (width and height)
             samples: Number of render samples for quality
+            use_gpu: Whether to use GPU for rendering (default: True)
         """
         self.resolution = resolution
         self.samples = samples
+        self.use_gpu = use_gpu
         
         # Setup Blender scene
         self._setup_scene()
@@ -58,6 +60,10 @@ class BlenderRenderer:
         bpy.context.scene.cycles.samples = self.samples
         bpy.context.scene.cycles.use_denoising = True
         
+        # Configure GPU rendering if enabled
+        if self.use_gpu:
+            self._setup_gpu_rendering()
+        
         # Set resolution
         bpy.context.scene.render.resolution_x = self.resolution
         bpy.context.scene.render.resolution_y = self.resolution
@@ -70,6 +76,40 @@ class BlenderRenderer:
         
         # Setup lighting
         self._setup_lighting()
+        
+    def _setup_gpu_rendering(self):
+        """Setup GPU rendering for Cycles."""
+        try:
+            # Get preferences
+            preferences = bpy.context.preferences
+            cycles_preferences = preferences.addons['cycles'].preferences
+            
+            # Enable GPU compute
+            cycles_preferences.compute_device_type = 'CUDA'  # Try CUDA first
+            
+            # Get available devices
+            cycles_preferences.get_devices()
+            
+            # Enable all available GPU devices
+            gpu_found = False
+            for device in cycles_preferences.devices:
+                if device.type in {'CUDA', 'OPTIX', 'HIP', 'METAL', 'ONEAPI'}:
+                    device.use = True
+                    gpu_found = True
+                    print(f"    [GPU] Enabled: {device.name} ({device.type})")
+            
+            if gpu_found:
+                # Set scene to use GPU
+                bpy.context.scene.cycles.device = 'GPU'
+                print(f"    [GPU] Rendering mode: GPU")
+            else:
+                print(f"    [GPU] No GPU devices found, falling back to CPU")
+                bpy.context.scene.cycles.device = 'CPU'
+                
+        except Exception as e:
+            print(f"    [GPU] Failed to setup GPU rendering: {e}")
+            print(f"    [GPU] Falling back to CPU rendering")
+            bpy.context.scene.cycles.device = 'CPU'
         
     def _setup_lighting(self):
         light_boost = 1.6#1.8

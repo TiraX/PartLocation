@@ -2,7 +2,8 @@
 setlocal EnableDelayedExpansion
 
 REM ====== User-configurable parameters ======
-set "BLENDER_EXE=D:\blender-3.6.23-windows-x64\blender.exe"
+rem set "BLENDER_EXE=D:\blender-3.6.23-windows-x64\blender.exe"
+set "BLENDER_EXE=D:\blender-5.0.1-windows-x64\blender.exe"
 REM ==========================================
 
 set "PROJECT_ROOT=%~dp0.."

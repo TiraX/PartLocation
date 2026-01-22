@@ -46,7 +46,7 @@ class ImageBuilder:
         if not BLENDER_AVAILABLE:
             raise RuntimeError("Blender is required for rendering. Please run this script with Blender.")
         
-        self.renderer = BlenderRenderer(resolution=resolution, samples=samples)
+        self.renderer = BlenderRenderer(resolution=resolution, samples=samples, use_gpu=True)
     
     def find_samples(self) -> List[Path]:
         """
