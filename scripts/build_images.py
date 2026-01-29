@@ -182,13 +182,23 @@ class ImageBuilder:
             validation_name = f"{sample_name}-validation"
             print(f"  Output: {sample_name}/{validation_name}_{{front,back,left,right}}.png")
             
-            if not self.renderer.render_assembled_parts(
-                part_fbx_list,
-                transform_params_list,
-                str(sample_images_dir),
-                validation_name
-            ):
-                print(f"  ERROR: Failed to render assembled parts for validation")
+            # Check if all 4 views already exist
+            views = ['front', 'back', 'left', 'right']
+            all_views_exist = all(
+                (sample_images_dir / f"{validation_name}_{view}.png").exists()
+                for view in views
+            )
+            
+            if all_views_exist:
+                print(f"  SKIPPED: All 4 views already exist")
+            else:
+                if not self.renderer.render_assembled_parts(
+                    part_fbx_list,
+                    transform_params_list,
+                    str(sample_images_dir),
+                    validation_name
+                ):
+                    print(f"  ERROR: Failed to render assembled parts for validation")
         else:
             print(f"\n[3/3] VALIDATION: Skipped (validation disabled or no parts)")
         
