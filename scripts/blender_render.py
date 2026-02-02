@@ -371,7 +371,8 @@ class BlenderRenderer:
         print(f"    [Render] Loaded {len(objects)} objects")
         
         # Render 4 views
-        views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
+        # views = [self.VIEW_FRONT, self.VIEW_BACK, self.VIEW_LEFT, self.VIEW_RIGHT]
+        views = [self.VIEW_BACK]
         base_name = Path(fbx_path).stem
         
         print(f"    [Render] Rendering 4 views to: {output_dir}")

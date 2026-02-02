@@ -100,7 +100,8 @@ class ImageBuilder:
         print(f"  Output: {sample_name}/{whole_fbx.stem}_{{front,back,left,right}}.png")
         
         # Check if all 4 views already exist
-        views = ['front', 'back', 'left', 'right']
+        # views = ['front', 'back', 'left', 'right']
+        views = ['back']
         all_views_exist = all(
             (sample_images_dir / f"{whole_fbx.stem}_{view}.png").exists()
             for view in views
@@ -128,7 +129,8 @@ class ImageBuilder:
             print(f"    Output: {sample_name}/{part_fbx.stem}_{{front,back,left,right}}.png")
             
             # Check if all 4 views already exist
-            views = ['front', 'back', 'left', 'right']
+            # views = ['front', 'back', 'left', 'right']
+            views = ['back']
             all_views_exist = all(
                 (sample_images_dir / f"{part_fbx.stem}_{view}.png").exists()
                 for view in views
