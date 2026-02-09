@@ -1,16 +1,17 @@
 # Core dependencies
 numpy>=1.24.0
 pillow>=10.0.0
-opencv-python>=4.8.0
 scipy>=1.11.0
 
-# Blender Python API (for data generation)
-# Note: Blender comes with its own Python, use bpy module within Blender
-# For standalone usage, install: pip install bpy
-# Or use Blender's Python directly
+# Deep Learning
+torch>=2.0.0
+torchvision>=0.15.0
 
-# Data handling
+# Configuration & Logging
 pyyaml>=6.0
+tensorboard>=2.14.0
+
+# Utilities
 tqdm>=4.65.0
 matplotlib>=3.7.0
 

@@ -1,0 +1,43 @@
+# Part Location Training Configuration
+
+# --- Paths ---
+data_dir: "./data/images"
+output_dir: "./outputs"
+
+# --- Dataset Split ---
+train_ratio: 0.7
+val_ratio: 0.15
+test_ratio: 0.15
+split_seed: 42
+
+# --- Model Architecture ---
+backbone_name: "dinov2_vitb14"  # Options: dinov2_vits14, dinov2_vitb14, dinov2_vitl14
+cross_attention_layers: 2
+mlp_hidden_dim: 512
+downsample_size: 32  # Spatial downsampling target (32x32 = 1024 tokens)
+image_size: 1024
+
+# --- Training ---
+batch_size: 2
+num_epochs: 100
+learning_rate: 1.0e-4
+weight_decay: 0.05
+grad_clip: 1.0
+accumulation_steps: 1
+use_amp: true
+use_gradient_checkpointing: true
+num_workers: 4
+pin_memory: true
+
+# --- Loss Weights ---
+w_trans: 1.0
+w_scale: 1.0
+
+# --- Learning Rate Scheduler ---
+scheduler: "cosine"  # Options: cosine
+warmup_epochs: 5
+min_lr: 1.0e-6
+
+# --- Checkpointing ---
+save_every_epochs: 1
+keep_last_n: 5
