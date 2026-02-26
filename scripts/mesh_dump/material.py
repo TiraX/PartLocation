@@ -1,5 +1,6 @@
+import os
 from typing import List, Optional, Dict
-from .material_param import MaterialParam
+from .material_param import MaterialParam, TextureParam, NumericParam, TextureType
 
 
 class Material:
@@ -90,6 +91,49 @@ class Material:
             material.add_parameter(param.copy())
         
         return material
+    
+    def dump_json(self, texture_relative_root: str) -> Dict:
+        """
+        Dump material to JSON-compatible dictionary
+        
+        Args:
+            texture_relative_root: Root path for relative texture paths
+            
+        Returns:
+            Dictionary containing material data with Textures, Parameters, Classified, and UVs sections
+        """
+        result = {
+            "Textures": {},
+            "Parameters": {},
+            "UVs": {},
+            "Classified": {}
+        }
+        
+        # Process all parameters
+        for param in self._parameters.values():
+            if isinstance(param, TextureParam):
+                texture_relative_path = os.path.relpath(param.texture_path, texture_relative_root)
+                texture_relative_path = texture_relative_path.replace('\\', '/')
+                # Add to Textures section
+                result["Textures"][param.name] = texture_relative_path
+                
+                # Add to UVs section
+                result["UVs"][param.name] = f"UVChannel{param.uv_layer}"
+                
+                # Add to Classified section if it's one of the special types
+                if param.texture_type == TextureType.DIFFUSE:
+                    result["Classified"]["Diffuse"] = texture_relative_path
+                elif param.texture_type == TextureType.NORMAL:
+                    result["Classified"]["Normal"] = texture_relative_path
+                elif param.texture_type == TextureType.METALLIC:
+                    result["Classified"]["Metallic"] = texture_relative_path
+                elif param.texture_type == TextureType.ROUGHNESS:
+                    result["Classified"]["Roughness"] = texture_relative_path
+            elif isinstance(param, NumericParam):
+                # Add to Parameters section
+                result["Parameters"][param.name] = param.value
+        
+        return result
     
     def __repr__(self) -> str:
         return f"Material(name='{self.name}', params={len(self._parameters)})"

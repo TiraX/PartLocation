@@ -825,14 +825,23 @@ class FbxUtil:
         material = Material(fbx_material.GetName())
         
         # Parse texture parameters from FBX material properties
-        self._parse_material_textures(fbx_material.Diffuse, material, TextureType.DIFFUSE)
-        self._parse_material_textures(fbx_material.NormalMap, material, TextureType.NORMAL)
-        self._parse_material_textures(fbx_material.Shininess, material, TextureType.ROUGHNESS)
-        self._parse_material_textures(fbx_material.ReflectionFactor, material, TextureType.METALLIC)
-        self._parse_material_textures(fbx_material.Specular, material, TextureType.SPECULAR)
-        self._parse_material_textures(fbx_material.Emissive, material, TextureType.EMISSIVE)
-        self._parse_material_textures(fbx_material.AmbientFactor, material, TextureType.AMBIENT_OCCLUSION)
-        self._parse_material_textures(fbx_material.TransparencyFactor, material, TextureType.OPACITY)
+        if isinstance(fbx_material, fbx.FbxSurfacePhong):
+            self._parse_material_textures(fbx_material.Diffuse, material, TextureType.DIFFUSE)
+            self._parse_material_textures(fbx_material.NormalMap, material, TextureType.NORMAL)
+            self._parse_material_textures(fbx_material.Shininess, material, TextureType.ROUGHNESS)
+            self._parse_material_textures(fbx_material.ReflectionFactor, material, TextureType.METALLIC)
+            self._parse_material_textures(fbx_material.Specular, material, TextureType.SPECULAR)
+            self._parse_material_textures(fbx_material.Emissive, material, TextureType.EMISSIVE)
+            self._parse_material_textures(fbx_material.AmbientFactor, material, TextureType.AMBIENT_OCCLUSION)
+            self._parse_material_textures(fbx_material.TransparencyFactor, material, TextureType.OPACITY)
+        elif isinstance(fbx_material, fbx.FbxSurfaceLambert):
+            self._parse_material_textures(fbx_material.Diffuse, material, TextureType.DIFFUSE)
+            self._parse_material_textures(fbx_material.NormalMap, material, TextureType.NORMAL)
+            self._parse_material_textures(fbx_material.Emissive, material, TextureType.EMISSIVE)
+            self._parse_material_textures(fbx_material.AmbientFactor, material, TextureType.AMBIENT_OCCLUSION)
+            self._parse_material_textures(fbx_material.TransparencyFactor, material, TextureType.OPACITY)
+        else:
+            print(f"  Unknown material type: {type(fbx_material)}")
         
         return material
     

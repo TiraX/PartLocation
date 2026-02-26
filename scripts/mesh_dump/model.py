@@ -1,5 +1,6 @@
 from typing import List, Optional, Tuple
 import numpy as np
+import json
 from .mesh import Mesh
 from .skeleton import Skeleton
 
@@ -272,6 +273,26 @@ class Model:
             models.append(model)
         
         return models
+    
+    def save_material_json(self, path: str, texture_relative_root: str) -> None:
+        """
+        Save material JSON to file
+        
+        Args:
+            path: File path to save JSON to
+            texture_relative_root: Root path for texture file references
+        """
+        materials_dict = {}
+        
+        # Collect all materials from all meshes
+        for mesh in self.meshes:
+            for material in mesh.materials:
+                # Use material name as key
+                materials_dict[material.name] = material.dump_json(texture_relative_root)
+        
+        # Write to JSON file with proper formatting
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(materials_dict, f, indent=2, ensure_ascii=False)
     
     def __repr__(self) -> str:
         skeleton_info = f", skeleton='{self.skeleton.name}'" if self.skeleton else ""
